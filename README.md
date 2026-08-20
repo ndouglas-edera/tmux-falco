@@ -1,4 +1,4 @@
-# tmux-falco
+# tmux Falco Environment
 Simple demo setup of a terminal multiplexer running Edera Zones and Falco realtime detection
 <br/><br/>
 Install tmux (if not already installed):
@@ -25,3 +25,8 @@ You can leave the session at any time with the ```exit``` command.
 - New Window: ```Ctrl+a``` then ```c```
 - Switch Window: ```Ctrl+a``` then ```1```, ```2```, etc.
 - Detach Session: ```Ctrl+a``` then ```d```
+
+## Configuring Falco
+```
+curl -sSL https://raw.githubusercontent.com/ndouglas-edera/tmux-falco/refs/heads/main/falco.yaml | sudo tee /etc/falco/falco.yaml > /dev/null
+```
