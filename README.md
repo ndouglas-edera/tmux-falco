@@ -83,6 +83,28 @@ sudo systemctl restart falco
 sudo journalctl -u falco -f -o cat
 ```
 
+Check if the falco ```service``` died:
+```
+sudo systemctl status falco -l
+```
+
+Edit falco service via ```vim```:
+```
+sudo SYSTEMD_EDITOR=vim systemctl edit falco
+```
+
+Create the drop-in override directory and file directly using a single command:
+```
+sudo mkdir -p /etc/systemd/system/falco-modern-bpf.service.d/ && printf "[Service]\nExecStart=\nExecStart=/usr/bin/falco --disable-driver\n" | sudo tee /etc/systemd/system/falco-modern-bpf.service.d/override.conf > /dev/null
+```
+
+Reload systemd and restart Falco to apply the override:
+```
+sudo systemctl daemon-reload
+sudo systemctl restart falco
+```
+
+
 Restore package default rules
 ```
 sudo apt-get install --reinstall -o Dpkg::Options::="--force-confask" falco
