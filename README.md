@@ -58,6 +58,11 @@ Run this command to append the standard output config to the end of ```/etc/falc
 echo -e "\nstdout_output:\n  enabled: true" | sudo tee -a /etc/falco/falco.yaml > /dev/null
 ```
 
+Append ```load_plugins``` directly to your main config file:
+```
+echo "load_plugins: [edera]" | sudo tee -a /etc/falco/falco.yaml > /dev/null
+```
+
 Now, restart the background service and run Falco in ```debug``` mode:
 ```
 sudo systemctl restart falco
@@ -65,3 +70,15 @@ sudo falco -o "log_level=debug"
 ```
 
 You should see Falco initialise, load the ```edera``` plugin, connect to ```/var/lib/edera/protect/daemon.socket```, and wait for zone events!
+<br/><br/>
+Run Falco with ```--disable-driver``` and streaming enabled. <br/>
+Leave this run in a separate window will show every rule alert live from the **[./run-edera-demo.sh](https://github.com/ndouglas-edera/EderaOn-quickstart#edera-automated-script)** script executes:
+```
+sudo falco --disable-driver -o "log_level=info"
+```
+
+Since Falco runs as a background service (```falco.service```), you can tail its output live using ```journalctl``` while running your test script:
+```
+sudo systemctl restart falco
+sudo journalctl -u falco -f -o cat
+```
