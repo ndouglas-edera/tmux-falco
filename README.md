@@ -11,8 +11,10 @@ vi ~/.tmux.conf
 ```
 If ```tmux``` is running, reload it inside a session by pressing ```Ctrl+a``` then ```r```. Otherwise, start a new session:
 ```
-tmux new -s dev
+tmux new -s edera
 ```
+
+You can leave the session at any time with the ```exit``` command.
 
 ## Key Shortcuts Overview
 - Prefix Key: ```Ctrl+a```
