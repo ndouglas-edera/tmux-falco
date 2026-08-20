@@ -1,0 +1,8 @@
+plugins:
+  - name: container
+    library_path: libcontainer.so
+    init_config:
+      label_max_len: 100
+      with_size: false
+  - name: edera
+    library_path: /var/lib/edera/protect/falco/libedera_falco_plugin.so
