@@ -82,3 +82,8 @@ Since Falco runs as a background service (```falco.service```), you can tail its
 sudo systemctl restart falco
 sudo journalctl -u falco -f -o cat
 ```
+
+Restore package default rules
+```
+sudo apt-get install --reinstall -o Dpkg::Options::="--force-confask" falco
+```
