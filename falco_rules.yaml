@@ -1,0 +1,23 @@
+- rule: Edera Proc Environ Read
+  desc: Detect reads of /proc/*/environ inside an Edera zone.
+  source: edera_zone
+  output: >
+    Credential harvesting attempt in zone
+    (zone_id=%edera.zone.id proc=%proc.exe file=%fd.name)
+  priority: WARNING
+  condition: >
+    evt.pluginname == "edera" and
+    evt.type in (open, openat) and
+    fd.name glob /proc/*/environ
+
+- rule: Edera Namespace Escape Attempt
+  desc: Detect nsenter execution inside an Edera zone.
+  source: edera_zone
+  output: >
+    Namespace escape attempt in zone
+    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
+  priority: CRITICAL
+  condition: >
+    evt.pluginname == "edera" and
+    evt.type in (execve, execveat) and
+    proc.name == nsenter
