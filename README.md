@@ -49,6 +49,11 @@ Now that ```/etc/falco/``` exists, we can run ```curl``` again:
 curl -sSL https://raw.githubusercontent.com/ndouglas-edera/tmux-falco/refs/heads/main/falco.yaml | sudo tee /etc/falco/falco.yaml > /dev/null
 ```
 
+We also need to download our falco rules to ```/etc/falco/falco_rules.yaml```:
+```
+curl -sSL https://raw.githubusercontent.com/ndouglas-edera/tmux-falco/refs/heads/main/falco_rules.yaml | sudo tee /etc/falco/falco_rules.yaml > /dev/null
+```
+
 Then we can restart Falco to get it up and running:
 ```
 sudo systemctl restart falco
