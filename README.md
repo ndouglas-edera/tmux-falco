@@ -53,8 +53,15 @@ We also need to download our falco rules to ```/etc/falco/falco_rules.yaml```:
 ```
 curl -sSL https://raw.githubusercontent.com/ndouglas-edera/tmux-falco/refs/heads/main/falco_rules.yaml | sudo tee /etc/falco/falco_rules.yaml > /dev/null
 ```
+Run this command to append the standard output config to the end of ```/etc/falco/falco.yaml```:
+```
+echo -e "\nstdout_output:\n  enabled: true" | sudo tee -a /etc/falco/falco.yaml > /dev/null
+```
 
-Then we can restart Falco to get it up and running:
+Now, restart the background service and run Falco in ```debug``` mode:
 ```
 sudo systemctl restart falco
+sudo falco -o "log_level=debug"
 ```
+
+You should see Falco initialise, load the ```edera``` plugin, connect to ```/var/lib/edera/protect/daemon.socket```, and wait for zone events!
