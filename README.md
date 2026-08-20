@@ -27,6 +27,29 @@ You can leave the session at any time with the ```exit``` command.
 - Detach Session: ```Ctrl+a``` then ```d```
 
 ## Configuring Falco
+I tried configuring Falco but it looks like it was not present in the Edera environment by default:
 ```
 curl -sSL https://raw.githubusercontent.com/ndouglas-edera/tmux-falco/refs/heads/main/falco.yaml | sudo tee /etc/falco/falco.yaml > /dev/null
+```
+
+Let's start by adding the Falco ```GPG key``` and associated ```repository```:
+```
+curl -fsSL https://falco.org/repo/falcosecurity-packages.asc | sudo gpg --dearmor -o /etc/apt/keyrings/falco-archive-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main" | sudo tee /etc/apt/sources.list.d/falcosecurity.list
+```
+
+As always, we need to update the package lists before installing Falco:
+```
+sudo apt-get update
+sudo apt-get install -y falco
+```
+
+Now that ```/etc/falco/``` exists, we can run ```curl``` again:
+```
+curl -sSL https://raw.githubusercontent.com/ndouglas-edera/tmux-falco/refs/heads/main/falco.yaml | sudo tee /etc/falco/falco.yaml > /dev/null
+```
+
+Then we can restart Falco to get it up and running:
+```
+sudo systemctl restart falco
 ```
