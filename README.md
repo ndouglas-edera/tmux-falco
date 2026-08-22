@@ -110,6 +110,8 @@ Restore package default rules
 sudo apt-get install --reinstall -o Dpkg::Options::="--force-confask" falco
 ```
 
+## Second attempt Falco (automation)
+
 Cleanup/remove Falco
 ```
 falco --version
@@ -119,4 +121,27 @@ sudo apt-get autoremove -y
 sudo find /etc/falco -maxdepth 2 -type f -print 2>/dev/null
 sudo mv /etc/falco /etc/falco.backup.$(date +%Y%m%d-%H%M%S)
 systemctl status falco --no-pager
+```
+
+Reinstall Falco
+```
+sudo apt-get update
+sudo apt-get install -y falco
+falco --version
+sudo ls -l /etc/falco/falco.yaml
+```
+
+Configure the Edera plugin:
+```
+sudo mkdir -p /etc/falco/config.d
+```
+
+Read the file / check it exists:
+```
+cat /etc/falco/config.d/falco-edera-config.yaml
+```
+
+Now, verify that the Edera library actually exists:
+```
+sudo ls -lh /var/lib/edera/protect/falco/libedera_falco_plugin.so
 ```
