@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 #
 # Cleanly install Falco + the Edera Falco plugin integration.
@@ -520,4 +519,3 @@ echo
 echo "Then launch an Edera zone and look for Edera plugin messages"
 echo "showing zone discovery and event streaming."
 echo
-```
