@@ -109,3 +109,14 @@ Restore package default rules
 ```
 sudo apt-get install --reinstall -o Dpkg::Options::="--force-confask" falco
 ```
+
+Cleanup/remove Falco
+```
+falco --version
+sudo systemctl stop falco 2>/dev/null || true
+sudo apt-get remove --purge -y falco
+sudo apt-get autoremove -y
+sudo find /etc/falco -maxdepth 2 -type f -print 2>/dev/null
+sudo mv /etc/falco /etc/falco.backup.$(date +%Y%m%d-%H%M%S)
+systemctl status falco --no-pager
+```
