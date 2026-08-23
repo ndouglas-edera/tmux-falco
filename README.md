@@ -156,3 +156,18 @@ Run the automation script:
 ```
 sudo ./install-falco-edera-v3.sh
 ```
+
+## Testing Falco Rules
+
+In **Tab A**:
+```
+sudo cat /etc/shadow >/dev/null
+```
+
+In **Tab B**:
+```
+sudo journalctl -u falco-modern-bpf.service -f
+```
+
+<img width="1506" height="856" alt="Screenshot 2026-08-23 at 23 11 55" src="https://github.com/user-attachments/assets/a026bcb7-c652-4247-8ef9-8d01b8c88bbb" />
+
