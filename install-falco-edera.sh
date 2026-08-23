@@ -16,6 +16,8 @@
 #   FALCO_SERVICE=falco-modern-bpf.service
 #   LOG_LINES=100
 #
+# The script intentionally prints the commands it executes.
+#
 
 set -Eeuo pipefail
 
@@ -30,20 +32,17 @@ FALCO_CONFIG_DIR="/etc/falco"
 FALCO_CONFIG_DROPIN_DIR="/etc/falco/config.d"
 FALCO_RULES_DIR="/etc/falco/rules.d"
 
+FALCO_MAIN_CONFIG="${FALCO_CONFIG_DIR}/falco.yaml"
+
 EDERA_PLUGIN="/var/lib/edera/protect/falco/libedera_falco_plugin.so"
 EDERA_SOCKET="/var/lib/edera/protect/daemon.socket"
 
 EDERA_CONFIG="${FALCO_CONFIG_DROPIN_DIR}/falco-edera-config.yaml"
 EDERA_RULES="${FALCO_RULES_DIR}/falco-edera-rules.yaml"
 
-# Old versions of this installer created a backup inside config.d.
-# Falco loads YAML files from this directory, so backups MUST NOT remain there.
-EDERA_CONFIG_BACKUP="${EDERA_CONFIG}.bak"
+BACKUP_DIR="/var/backups/falco-edera"
 
 LOG_LINES="${LOG_LINES:-100}"
-
-# Temporary validation log.
-FALCO_VALIDATE_LOG="$(mktemp /tmp/falco-edera-config-check.XXXXXX.log)"
 
 # ---------------------------------------------------------------------------
 # Colours
@@ -55,6 +54,7 @@ if [[ -t 1 ]]; then
     YELLOW='\033[1;33m'
     BLUE='\033[0;34m'
     CYAN='\033[0;36m'
+    MAGENTA='\033[0;35m'
     BOLD='\033[1m'
     RESET='\033[0m'
 else
@@ -63,19 +63,10 @@ else
     YELLOW=''
     BLUE=''
     CYAN=''
+    MAGENTA=''
     BOLD=''
     RESET=''
 fi
-
-# ---------------------------------------------------------------------------
-# Cleanup temporary files
-# ---------------------------------------------------------------------------
-
-cleanup_temp() {
-    rm -f "$FALCO_VALIDATE_LOG"
-}
-
-trap cleanup_temp EXIT
 
 # ---------------------------------------------------------------------------
 # Logging helpers
@@ -101,6 +92,10 @@ debug() {
     echo -e "${CYAN}[DEBUG]${RESET} $*"
 }
 
+command_log() {
+    echo -e "${MAGENTA}[CMD ]${RESET} $*"
+}
+
 section() {
     echo
     echo "============================================================"
@@ -112,6 +107,38 @@ section() {
 die() {
     error "$*"
     exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Command execution helpers
+#
+# Every command executed through these helpers is displayed first.
+# ---------------------------------------------------------------------------
+
+print_cmd() {
+    local arg
+    printf '%s' "${MAGENTA}[CMD ]${RESET} "
+
+    for arg in "$@"; do
+        printf '%q ' "$arg"
+    done
+
+    printf '\n'
+}
+
+run_cmd() {
+    print_cmd "$@"
+    "$@"
+}
+
+run_cmd_quiet() {
+    print_cmd "$@"
+    "$@" >/dev/null
+}
+
+run_cmd_capture() {
+    print_cmd "$@"
+    "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -130,7 +157,8 @@ on_error() {
     echo
 
     warn "The installation may be partially complete."
-    warn "Run:"
+    echo
+    echo "Recommended diagnostics:"
     echo
     echo "  sudo $0 --check"
     echo "  sudo $0 --status"
@@ -143,7 +171,7 @@ on_error() {
 trap on_error ERR
 
 # ---------------------------------------------------------------------------
-# Privilege checks
+# Privilege / command checks
 # ---------------------------------------------------------------------------
 
 require_root() {
@@ -153,7 +181,9 @@ require_root() {
 }
 
 require_command() {
-    command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+    if ! command -v "$1" >/dev/null 2>&1; then
+        die "Required command not found: $1"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -170,6 +200,62 @@ service_active() {
 
 service_enabled() {
     systemctl is-enabled --quiet "$FALCO_SERVICE"
+}
+
+# ---------------------------------------------------------------------------
+# Utility: timestamp
+# ---------------------------------------------------------------------------
+
+timestamp() {
+    date '+%Y%m%d-%H%M%S'
+}
+
+# ---------------------------------------------------------------------------
+# Utility: backup a file if it exists
+# ---------------------------------------------------------------------------
+
+backup_file() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        return 0
+    fi
+
+    mkdir -p "$BACKUP_DIR"
+
+    local base
+    local backup
+
+    base="$(basename "$file")"
+    backup="${BACKUP_DIR}/${base}.$(timestamp).bak"
+
+    print_cmd cp -a "$file" "$backup"
+    cp -a "$file" "$backup"
+
+    ok "Backed up ${file}"
+    echo "     -> ${backup}"
+}
+
+# ---------------------------------------------------------------------------
+# Utility: show a file
+# ---------------------------------------------------------------------------
+
+show_file() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        warn "File does not exist: $file"
+        return 0
+    fi
+
+    echo
+    echo "----- ${file} -----"
+
+    print_cmd sed -n '1,240p' "$file"
+    sed -n '1,240p' "$file"
+
+    echo "----- end ${file} -----"
+    echo
 }
 
 # ---------------------------------------------------------------------------
@@ -190,10 +276,14 @@ show_status() {
         ok "Service unit exists"
 
         echo
+        print_cmd systemctl is-enabled "$FALCO_SERVICE"
         systemctl is-enabled "$FALCO_SERVICE" 2>&1 || true
+
+        print_cmd systemctl is-active "$FALCO_SERVICE"
         systemctl is-active "$FALCO_SERVICE" 2>&1 || true
 
         echo
+        print_cmd systemctl status "$FALCO_SERVICE" --no-pager -l
         systemctl status "$FALCO_SERVICE" --no-pager -l || true
     else
         error "Service unit does not exist: ${FALCO_SERVICE}"
@@ -203,8 +293,10 @@ show_status() {
     echo -e "${BOLD}Alias:${RESET}"
 
     if [[ -L "/etc/systemd/system/${FALCO_ALIAS}" ]]; then
+        print_cmd ls -l "/etc/systemd/system/${FALCO_ALIAS}"
         ls -l "/etc/systemd/system/${FALCO_ALIAS}"
     elif [[ -e "/etc/systemd/system/${FALCO_ALIAS}" ]]; then
+        print_cmd ls -l "/etc/systemd/system/${FALCO_ALIAS}"
         ls -l "/etc/systemd/system/${FALCO_ALIAS}"
     else
         warn "No ${FALCO_ALIAS} alias found"
@@ -214,9 +306,19 @@ show_status() {
     echo -e "${BOLD}Falco binary:${RESET}"
 
     if command -v falco >/dev/null 2>&1; then
+        print_cmd falco --version
         falco --version || true
     else
         error "Falco binary not found"
+    fi
+
+    echo
+    echo -e "${BOLD}Falco main configuration:${RESET}"
+
+    if [[ -f "$FALCO_MAIN_CONFIG" ]]; then
+        ok "$FALCO_MAIN_CONFIG exists"
+    else
+        error "Missing $FALCO_MAIN_CONFIG"
     fi
 
     echo
@@ -224,6 +326,8 @@ show_status() {
 
     if [[ -f "$EDERA_PLUGIN" ]]; then
         ok "Plugin exists"
+
+        print_cmd ls -lh "$EDERA_PLUGIN"
         ls -lh "$EDERA_PLUGIN"
     else
         error "Plugin missing: $EDERA_PLUGIN"
@@ -234,6 +338,8 @@ show_status() {
 
     if [[ -S "$EDERA_SOCKET" ]]; then
         ok "Socket exists"
+
+        print_cmd ls -l "$EDERA_SOCKET"
         ls -l "$EDERA_SOCKET"
     else
         warn "Socket missing: $EDERA_SOCKET"
@@ -244,8 +350,8 @@ show_status() {
 
     if [[ -f "$EDERA_CONFIG" ]]; then
         ok "$EDERA_CONFIG"
-        echo
-        cat "$EDERA_CONFIG"
+
+        show_file "$EDERA_CONFIG"
     else
         error "Missing: $EDERA_CONFIG"
     fi
@@ -255,30 +361,33 @@ show_status() {
 
     if [[ -f "$EDERA_RULES" ]]; then
         ok "$EDERA_RULES"
+
+        show_file "$EDERA_RULES"
     else
         error "Missing: $EDERA_RULES"
     fi
 
     echo
-    echo -e "${BOLD}Potential stale Edera configuration files:${RESET}"
+    echo -e "${BOLD}Edera configuration backups:${RESET}"
 
-    local stale_found=0
+    if [[ -d "$BACKUP_DIR" ]]; then
+        local backups=()
 
-    while IFS= read -r -d '' file; do
-        warn "Falco may load this YAML file: $file"
-        stale_found=1
-    done < <(
-        find "$FALCO_CONFIG_DROPIN_DIR" \
-            -maxdepth 1 \
-            -type f \
-            \( -name 'falco-edera-config.yaml.bak' \
-               -o -name 'falco-edera-config.yml.bak' \
-               -o -name 'falco-edera-*.bak' \) \
-            -print0 2>/dev/null
-    )
+        while IFS= read -r -d '' file; do
+            backups+=("$file")
+        done < <(
+            print_cmd find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.bak' -print0 >&2
+            find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.bak' -print0
+        )
 
-    if [[ "$stale_found" -eq 0 ]]; then
-        ok "No stale Edera backup configuration found"
+        if [[ "${#backups[@]}" -eq 0 ]]; then
+            ok "No configuration backups found"
+        else
+            info "Configuration backups:"
+            printf '  %s\n' "${backups[@]}"
+        fi
+    else
+        ok "No backup directory exists"
     fi
 }
 
@@ -295,6 +404,8 @@ show_logs() {
     info "Service: ${FALCO_SERVICE}"
     info "Showing last ${LOG_LINES} lines"
     echo
+
+    print_cmd journalctl -u "$FALCO_SERVICE" -n "$LOG_LINES" --no-pager -o short-precise
 
     journalctl \
         -u "$FALCO_SERVICE" \
@@ -313,10 +424,208 @@ follow_logs() {
     info "Press Ctrl+C to stop"
     echo
 
+    print_cmd journalctl -u "$FALCO_SERVICE" -f -o short-precise
+
     journalctl \
         -u "$FALCO_SERVICE" \
         -f \
         -o short-precise
+}
+
+# ---------------------------------------------------------------------------
+# Falco configuration validation
+# ---------------------------------------------------------------------------
+
+validate_falco_config() {
+    local failures=0
+
+    section "Falco Configuration Validation"
+
+    if ! command -v falco >/dev/null 2>&1; then
+        error "Falco binary not found"
+        return 1
+    fi
+
+    if falco --help 2>&1 | grep -q -- '--dry-run'; then
+        local tmp_log="/tmp/falco-edera-config-check.log"
+
+        info "Falco supports --dry-run."
+        info "Validating configuration without starting a second Falco daemon."
+
+        print_cmd falco --dry-run
+
+        if falco --dry-run >"$tmp_log" 2>&1; then
+            ok "Falco configuration validation passed"
+        else
+            error "Falco configuration validation failed"
+            echo
+            print_cmd cat "$tmp_log"
+            cat "$tmp_log"
+
+            failures=1
+        fi
+
+        rm -f "$tmp_log"
+    else
+        warn "This Falco build does not expose --dry-run."
+        warn "Configuration will be validated through service startup."
+    fi
+
+    return "$failures"
+}
+
+# ---------------------------------------------------------------------------
+# Edera plugin registration / event source checks
+# ---------------------------------------------------------------------------
+
+check_plugin_registration() {
+    local failures=0
+
+    echo
+    echo -e "${BOLD}9. Edera plugin registration${RESET}"
+
+    if [[ ! -f "$EDERA_PLUGIN" ]]; then
+        error "Edera plugin library does not exist"
+        return 1
+    fi
+
+    # Falco 0.44 exposes plugin information through `falco --list-plugins`.
+    if falco --help 2>&1 | grep -q -- '--list-plugins'; then
+        local plugin_output
+
+        print_cmd falco --list-plugins
+
+        plugin_output="$(falco --list-plugins 2>&1 || true)"
+
+        if grep -qE '(^|[[:space:]])edera([@[:space:]]|$)' <<<"$plugin_output"; then
+            ok "Edera plugin is registered with Falco"
+        else
+            error "Edera plugin was not found in Falco's plugin list"
+            failures=$((failures + 1))
+        fi
+
+        if grep -q "edera_zone" <<<"$plugin_output"; then
+            ok "Edera plugin exposes event source: edera_zone"
+        else
+            warn "Could not confirm edera_zone through falco --list-plugins"
+        fi
+    else
+        warn "Falco does not expose --list-plugins."
+        warn "Using current service logs instead."
+    fi
+
+    return "$failures"
+}
+
+# ---------------------------------------------------------------------------
+# Current-boot log checks
+# ---------------------------------------------------------------------------
+
+get_current_boot_logs() {
+    journalctl \
+        -b \
+        -u "$FALCO_SERVICE" \
+        --no-pager \
+        2>/dev/null || true
+}
+
+check_current_logs() {
+    local failures=0
+    local logs
+
+    echo
+    echo -e "${BOLD}10. Current Falco log state${RESET}"
+
+    logs="$(get_current_boot_logs)"
+
+    if [[ -z "$logs" ]]; then
+        warn "No current-boot journal entries found"
+        return 0
+    fi
+
+    if grep -q "Loaded plugin 'edera@" <<<"$logs"; then
+        ok "Edera plugin was loaded by Falco"
+    else
+        error "No evidence that Falco loaded the Edera plugin"
+        failures=$((failures + 1))
+    fi
+
+    if grep -q "Loaded event sources:.*edera_zone" <<<"$logs"; then
+        ok "edera_zone is a loaded event source"
+    elif grep -q "edera_zone" <<<"$logs"; then
+        ok "edera_zone appears in current Falco logs"
+    else
+        error "No evidence of edera_zone event source"
+        failures=$((failures + 1))
+    fi
+
+    if grep -q "Enabled event sources:.*edera_zone" <<<"$logs"; then
+        ok "edera_zone is enabled"
+    else
+        warn "edera_zone is not shown as enabled"
+    fi
+
+    if grep -q "Opening 'edera_zone' source with plugin 'edera'" <<<"$logs"; then
+        ok "Falco opened the edera_zone source"
+    else
+        warn "No evidence that Falco opened edera_zone"
+    fi
+
+    # IMPORTANT:
+    # A loaded plugin is not necessarily a healthy plugin.
+    #
+    # The logs supplied by the user contained:
+    #
+    #   Client error: transport error
+    #
+    # Therefore we explicitly detect these errors.
+
+    if grep -Eqi \
+        "edera:.*(client error|transport error|connection refused|service unavailable|failed to watch events)" \
+        <<<"$logs"; then
+
+        error "Edera plugin reported a transport/connectivity error"
+
+        echo
+        echo -e "${RED}${BOLD}Relevant Edera connectivity messages:${RESET}"
+
+        grep -Ei \
+            "edera.*(client error|transport error|connection refused|service unavailable|failed to watch events)" \
+            <<<"$logs" \
+            | tail -30 || true
+
+        failures=$((failures + 1))
+    else
+        ok "No Edera transport/connectivity errors detected"
+    fi
+
+    if grep -q "waiting for zones" <<<"$logs"; then
+        ok "Edera plugin is waiting for zones"
+        info "This is normally expected when no Edera zone is currently available."
+    fi
+
+    if grep -q "Runtime error: error in plugin edera init config" <<<"$logs"; then
+        error "Falco previously reported an Edera plugin init-config error"
+        failures=$((failures + 1))
+    fi
+
+    if grep -q "Main process exited" <<<"$logs"; then
+        warn "Falco has exited at least once during this boot"
+    fi
+
+    if grep -q "Failed with result 'exit-code'" <<<"$logs"; then
+        warn "systemd recorded a Falco exit-code failure during this boot"
+    fi
+
+    echo
+    echo -e "${BOLD}Relevant current-boot messages:${RESET}"
+
+    grep -Ei \
+        "edera|error|failed|warning|loaded event sources|enabled event sources|waiting for zones|Runtime error" \
+        <<<"$logs" \
+        | tail -60 || true
+
+    return "$failures"
 }
 
 # ---------------------------------------------------------------------------
@@ -338,6 +647,8 @@ check_service() {
     echo
     echo -e "${BOLD}2. Service enabled${RESET}"
 
+    print_cmd systemctl is-enabled "$FALCO_SERVICE"
+
     if service_enabled; then
         ok "${FALCO_SERVICE} is enabled"
     else
@@ -348,6 +659,8 @@ check_service() {
     echo
     echo -e "${BOLD}3. Service active${RESET}"
 
+    print_cmd systemctl is-active "$FALCO_SERVICE"
+
     if service_active; then
         ok "${FALCO_SERVICE} is active/running"
     else
@@ -355,6 +668,8 @@ check_service() {
 
         echo
         warn "Current service status:"
+
+        print_cmd systemctl status "$FALCO_SERVICE" --no-pager -l
         systemctl status "$FALCO_SERVICE" --no-pager -l || true
 
         failures=$((failures + 1))
@@ -369,10 +684,10 @@ check_files() {
     echo
     echo -e "${BOLD}4. Falco configuration${RESET}"
 
-    if [[ -f "${FALCO_CONFIG_DIR}/falco.yaml" ]]; then
+    if [[ -f "$FALCO_MAIN_CONFIG" ]]; then
         ok "Default Falco configuration exists"
     else
-        error "Missing ${FALCO_CONFIG_DIR}/falco.yaml"
+        error "Missing $FALCO_MAIN_CONFIG"
         failures=$((failures + 1))
     fi
 
@@ -395,6 +710,8 @@ check_files() {
 
     if [[ -f "$EDERA_PLUGIN" && -x "$EDERA_PLUGIN" ]]; then
         ok "Edera plugin exists and is executable"
+
+        print_cmd ls -lh "$EDERA_PLUGIN"
         ls -lh "$EDERA_PLUGIN"
     else
         error "Edera plugin missing or not executable"
@@ -406,196 +723,64 @@ check_files() {
 
     if [[ -S "$EDERA_SOCKET" ]]; then
         ok "Edera daemon socket exists"
+
+        print_cmd ls -l "$EDERA_SOCKET"
         ls -l "$EDERA_SOCKET"
     else
-        warn "Edera daemon socket does not exist"
-        warn "This may mean the Edera daemon is not running."
-        # The plugin can still load without the socket, so this is a warning
-        # rather than a hard health-check failure.
-    fi
-
-    echo
-    echo -e "${BOLD}7. Stale Edera config backups${RESET}"
-
-    local stale_found=0
-
-    while IFS= read -r -d '' file; do
-        error "Stale Edera config found in Falco config.d: $file"
-        failures=$((failures + 1))
-        stale_found=1
-    done < <(
-        find "$FALCO_CONFIG_DROPIN_DIR" \
-            -maxdepth 1 \
-            -type f \
-            \( -name 'falco-edera-config.yaml.bak' \
-               -o -name 'falco-edera-config.yml.bak' \
-               -o -name 'falco-edera-*.bak' \) \
-            -print0 2>/dev/null
-    )
-
-    if [[ "$stale_found" -eq 0 ]]; then
-        ok "No stale Edera config backups found"
-    fi
-
-    return "$failures"
-}
-
-check_falco_config() {
-    local failures=0
-
-    echo
-    echo -e "${BOLD}8. Falco configuration validation${RESET}"
-
-    if ! command -v falco >/dev/null 2>&1; then
-        error "Falco binary not found"
-        return 1
-    fi
-
-    if falco --help 2>&1 | grep -q -- '--dry-run'; then
-        if falco --dry-run >"$FALCO_VALIDATE_LOG" 2>&1; then
-            ok "Falco configuration validation passed"
-
-            if grep -q "schema validation: failed" "$FALCO_VALIDATE_LOG"; then
-                error "Falco reported a schema validation failure"
-                cat "$FALCO_VALIDATE_LOG"
-                failures=$((failures + 1))
-            fi
-
-            if grep -q "source_plugin" "$FALCO_VALIDATE_LOG"; then
-                error "Unexpected source_plugin configuration detected"
-                cat "$FALCO_VALIDATE_LOG"
-                failures=$((failures + 1))
-            fi
-        else
-            error "Falco configuration validation failed"
-            cat "$FALCO_VALIDATE_LOG"
-            failures=$((failures + 1))
-        fi
-    else
-        warn "This Falco build does not expose --dry-run"
-        warn "Relying on the running service and journal configuration checks"
-    fi
-
-    return "$failures"
-}
-
-check_plugin() {
-    local failures=0
-
-    echo
-    echo -e "${BOLD}9. Edera plugin loading${RESET}"
-
-    if ! command -v falco >/dev/null 2>&1; then
-        error "Falco binary not found"
-        return 1
-    fi
-
-    if falco --list-plugins >"$FALCO_VALIDATE_LOG" 2>&1; then
-        if grep -q "Name: edera" "$FALCO_VALIDATE_LOG"; then
-            ok "Edera plugin is registered with Falco"
-        else
-            error "Edera plugin is not listed by Falco"
-            failures=$((failures + 1))
-        fi
-
-        if grep -q "source='edera_zone'" "$FALCO_VALIDATE_LOG"; then
-            ok "Edera plugin exposes event source: edera_zone"
-        else
-            warn "edera_zone event source was not shown in plugin capabilities"
-        fi
-    else
-        error "falco --list-plugins failed"
-        cat "$FALCO_VALIDATE_LOG"
+        error "Edera daemon socket does not exist"
         failures=$((failures + 1))
     fi
 
     return "$failures"
 }
 
-check_logs() {
+check_backups() {
     local failures=0
-    local logs
 
     echo
-    echo -e "${BOLD}10. Current Falco log state${RESET}"
+    echo -e "${BOLD}7. Edera configuration backups${RESET}"
 
-    # Only inspect logs from the current boot.
-    # This avoids treating an old failed Falco startup as a current failure.
-    logs="$(journalctl \
-        -u "$FALCO_SERVICE" \
-        -b \
-        -n 150 \
-        --no-pager 2>/dev/null || true)"
-
-    if [[ -z "$logs" ]]; then
-        warn "No current-boot journal entries found"
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        ok "No backup directory exists"
         return 0
     fi
 
-    if grep -q "Loaded plugin 'edera@" <<<"$logs"; then
-        ok "Edera plugin was loaded by Falco"
+    local count
+
+    print_cmd bash -c \
+        'find "$1" -maxdepth 1 -type f -name "*.bak" -print' \
+        bash "$BACKUP_DIR"
+
+    count="$(
+        find "$BACKUP_DIR" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.bak' \
+            -print \
+            | wc -l
+    )"
+
+    if [[ "$count" -eq 0 ]]; then
+        ok "No configuration backups found"
     else
-        error "No evidence of the Edera plugin being loaded"
-        failures=$((failures + 1))
+        info "${count} configuration backup(s) found"
+
+        find "$BACKUP_DIR" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.bak' \
+            -print \
+            | sort \
+            | sed 's/^/  /'
     fi
-
-    if grep -q "source='edera_zone'" <<<"$logs"; then
-        ok "Falco identified Edera event source: edera_zone"
-    elif grep -q "edera_zone" <<<"$logs"; then
-        ok "edera_zone appears in current Falco logs"
-    else
-        warn "No edera_zone message found in current Falco logs"
-    fi
-
-    if grep -q "Runtime error:" <<<"$logs"; then
-        error "Falco reported a runtime error during the current boot"
-        failures=$((failures + 1))
-    fi
-
-    if grep -q "Main process exited" <<<"$logs"; then
-        error "Falco process exited during the current boot"
-        failures=$((failures + 1))
-    fi
-
-    if grep -q "Failed with result" <<<"$logs"; then
-        error "systemd reports a Falco failure during the current boot"
-        failures=$((failures + 1))
-    fi
-
-    if grep -q "schema validation failed" <<<"$logs"; then
-        error "Falco reported a configuration schema validation failure"
-        failures=$((failures + 1))
-    fi
-
-    if grep -q "source_plugin" <<<"$logs"; then
-        error "Falco encountered the obsolete source_plugin configuration"
-        failures=$((failures + 1))
-    fi
-
-    if grep -q "error in plugin edera init config" <<<"$logs"; then
-        error "Edera plugin initialization failed"
-        failures=$((failures + 1))
-    fi
-
-    if grep -q "waiting for zones" <<<"$logs"; then
-        ok "Edera plugin is waiting for zones"
-        info "This is expected when no Edera zone is currently available."
-    fi
-
-    echo
-    echo -e "${BOLD}Relevant current-boot messages:${RESET}"
-
-    grep -Ei \
-        "edera|error|failed|warning|loaded event sources|enabled event sources|waiting for zones" \
-        <<<"$logs" \
-        | tail -50 \
-        || true
 
     return "$failures"
 }
 
 run_check() {
     require_root
+    require_command systemctl
+    require_command journalctl
 
     section "Falco + Edera Health Check"
 
@@ -603,9 +788,10 @@ run_check() {
 
     check_service || failures=$((failures + 1))
     check_files || failures=$((failures + 1))
-    check_falco_config || failures=$((failures + 1))
-    check_plugin || failures=$((failures + 1))
-    check_logs || failures=$((failures + 1))
+    check_backups || failures=$((failures + 1))
+    validate_falco_config || failures=$((failures + 1))
+    check_plugin_registration || failures=$((failures + 1))
+    check_current_logs || failures=$((failures + 1))
 
     echo
     echo "============================================================"
@@ -614,16 +800,14 @@ run_check() {
         echo -e "${GREEN}${BOLD}[ PASS ] Falco + Edera health check passed${RESET}"
         echo "============================================================"
         echo
-        info "Falco is running and the Edera plugin is loaded."
-        info "The Edera plugin exposes the edera_zone event source."
-
+        info "Falco is running and the Edera integration appears healthy."
         echo
-        info "If the plugin says 'waiting for zones', create/use an Edera zone"
-        info "and then run:"
+        info "Useful commands:"
         echo
+        echo "  sudo $0 --status"
+        echo "  sudo $0 --logs"
         echo "  sudo $0 --follow"
         echo
-
         return 0
     fi
 
@@ -631,7 +815,9 @@ run_check() {
     echo "============================================================"
     echo
 
-    warn "Run the following for more information:"
+    warn "Falco may still be running, but the Edera integration is not fully healthy."
+    echo
+    warn "Run:"
     echo
     echo "  sudo $0 --status"
     echo "  sudo $0 --logs"
@@ -641,81 +827,12 @@ run_check() {
 }
 
 # ---------------------------------------------------------------------------
-# Cleanup
-# ---------------------------------------------------------------------------
-
-cleanup() {
-    require_root
-    require_command systemctl
-
-    section "Falco + Edera Cleanup"
-
-    warn "This removes the Edera-specific Falco configuration and rules."
-    warn "It does NOT uninstall Falco itself."
-    warn "It does NOT remove the Edera plugin binary."
-    warn "It does NOT remove the Edera daemon."
-    echo
-
-    read -r -p "Continue? [y/N] " answer
-
-    case "$answer" in
-        y|Y|yes|YES)
-            ;;
-        *)
-            info "Cleanup cancelled."
-            return 0
-            ;;
-    esac
-
-    echo
-
-    info "Stopping ${FALCO_SERVICE}..."
-
-    if service_exists; then
-        systemctl stop "$FALCO_SERVICE" || true
-    fi
-
-    info "Removing Edera Falco configuration..."
-
-    rm -f "$EDERA_CONFIG"
-    rm -f "$EDERA_CONFIG_BACKUP"
-    rm -f "$EDERA_RULES"
-
-    # Remove any other old Edera backups from config.d.
-    find "$FALCO_CONFIG_DROPIN_DIR" \
-        -maxdepth 1 \
-        -type f \
-        \( -name 'falco-edera-config.yaml.bak'
-           -o -name 'falco-edera-config.yml.bak'
-           -o -name 'falco-edera-*.bak' \) \
-        -delete 2>/dev/null || true
-
-    ok "Removed Edera Falco configuration files"
-
-    info "Reloading systemd..."
-
-    systemctl daemon-reload
-
-    info "Starting ${FALCO_SERVICE} again..."
-
-    if service_exists; then
-        systemctl start "$FALCO_SERVICE" || true
-    fi
-
-    echo
-    ok "Cleanup complete."
-    echo
-
-    info "Falco itself was NOT uninstalled."
-    info "The Edera plugin binary was NOT removed."
-    info "The Edera daemon was NOT removed."
-}
-
-# ---------------------------------------------------------------------------
 # Installation
 # ---------------------------------------------------------------------------
 
 install_falco() {
+    require_root
+
     section "Installing Falco + Edera Integration"
 
     info "Falco service: ${FALCO_SERVICE}"
@@ -729,9 +846,12 @@ install_falco() {
     section "Step 1: Checking prerequisites"
 
     require_command systemctl
+    require_command journalctl
     require_command curl
     require_command apt-get
-    require_command journalctl
+    require_command sed
+    require_command grep
+    require_command find
 
     ok "Required commands are available"
 
@@ -743,6 +863,9 @@ install_falco() {
 
     if [[ -S "$EDERA_SOCKET" ]]; then
         ok "Edera daemon socket exists"
+
+        print_cmd ls -l "$EDERA_SOCKET"
+        ls -l "$EDERA_SOCKET"
     else
         warn "Edera daemon socket not found:"
         warn "  ${EDERA_SOCKET}"
@@ -753,28 +876,20 @@ install_falco() {
     # Step 3
     # -----------------------------------------------------------------------
 
-    section "Step 3: Installing Falco"
-
-    # Keep the existing Falco installation mechanism here.
-    #
-    # Example:
-    #
-    # curl -fsSL https://falco.org/repo/falcosecurity-packages.asc \
-    #   | gpg --dearmor -o /usr/share/keyrings/falco-archive-keyring.gpg
-    #
-    # ... repository setup ...
-    #
-    # apt-get update
-    # apt-get install -y falco
-    #
-    # The original script intentionally expects Falco to already be
-    # installed, so that behaviour is preserved.
+    section "Step 3: Checking Falco"
 
     if command -v falco >/dev/null 2>&1; then
         ok "Falco is already installed"
+
+        print_cmd falco --version
         falco --version || true
     else
-        die "Falco is not installed. Insert/use the existing Falco installation block here."
+        die "Falco is not installed."
+
+        #
+        # If you want this script to install Falco from scratch, put your
+        # existing Falco repository/install block here.
+        #
     fi
 
     # -----------------------------------------------------------------------
@@ -800,10 +915,14 @@ install_falco() {
     fi
 
     if [[ ! -x "$EDERA_PLUGIN" ]]; then
+        info "Plugin is not executable; fixing permissions."
+
+        print_cmd chmod +x "$EDERA_PLUGIN"
         chmod +x "$EDERA_PLUGIN"
     fi
 
     ok "Edera plugin exists:"
+    print_cmd ls -lh "$EDERA_PLUGIN"
     ls -lh "$EDERA_PLUGIN"
 
     # -----------------------------------------------------------------------
@@ -812,15 +931,19 @@ install_falco() {
 
     section "Step 6: Enabling Falco"
 
+    print_cmd systemctl daemon-reload
     systemctl daemon-reload
 
+    #
     # IMPORTANT:
+    #
     # Do NOT run:
     #
     #   systemctl enable falco.service
     #
-    # because falco.service may be an alias/symlink to the real unit.
+    # because falco.service is an alias pointing at the real unit.
     #
+    print_cmd systemctl enable "$FALCO_SERVICE"
     systemctl enable "$FALCO_SERVICE"
 
     ok "Enabled ${FALCO_SERVICE}"
@@ -829,193 +952,114 @@ install_falco() {
     # Step 7
     # -----------------------------------------------------------------------
 
-    section "Step 7: Writing Edera plugin configuration"
+    section "Step 7: Preparing Edera plugin configuration"
 
-    mkdir -p "$FALCO_CONFIG_DROPIN_DIR"
+    print_cmd mkdir -p "$FALCO_CONFIG_DROPIN_DIR" "$FALCO_RULES_DIR" "$BACKUP_DIR"
+    mkdir -p \
+        "$FALCO_CONFIG_DROPIN_DIR" \
+        "$FALCO_RULES_DIR" \
+        "$BACKUP_DIR"
 
-    # IMPORTANT:
-    #
-    # Falco loads configuration files from config.d.
-    #
-    # Therefore an old:
-    #
-    #   falco-edera-config.yaml.bak
-    #
-    # is NOT harmless. Falco can attempt to parse it as another config file.
-    #
-    # Remove old backups before writing the new configuration.
-    rm -f "$EDERA_CONFIG_BACKUP"
-
-    find "$FALCO_CONFIG_DROPIN_DIR" \
-        -maxdepth 1 \
-        -type f \
-        \( -name 'falco-edera-config.yaml.bak'
-           -o -name 'falco-edera-config.yml.bak'
-           -o -name 'falco-edera-*.bak' \) \
-        -delete 2>/dev/null || true
-
-    # IMPORTANT:
-    #
-    # Do NOT add:
-    #
-    #   source_plugin:
-    #     name: edera_zone
-    #     library_path: ...
-    #
-    # Falco 0.44.1 rejects source_plugin as a top-level configuration
-    # property.
-    #
-    # The Edera plugin itself declares:
-    #
-    #   source='edera_zone'
-    #
-    # through its plugin capabilities.
-    #
-    # init_config MUST remain an object:
-    #
-    #   init_config: {}
-    #
-    # NOT:
-    #
-    #   init_config: ""
-    #
-    cat > "$EDERA_CONFIG" <<EOF
-plugins:
-  - name: edera
-    library_path: ${EDERA_PLUGIN}
-    init_config: {}
-
-load_plugins:
-  - edera
-EOF
-
-    chmod 0644 "$EDERA_CONFIG"
-
-    ok "Created:"
-    echo "  ${EDERA_CONFIG}"
-
-    echo
-    echo -e "${BOLD}Generated Edera configuration:${RESET}"
-    cat "$EDERA_CONFIG"
+    # Back up existing files before changing them.
+    backup_file "$EDERA_CONFIG"
+    backup_file "$EDERA_RULES"
 
     # -----------------------------------------------------------------------
     # Step 8
     # -----------------------------------------------------------------------
 
-    section "Step 8: Writing Edera detection rules"
+    section "Step 8: Writing Edera plugin configuration"
 
-    mkdir -p "$FALCO_RULES_DIR"
+    #
+    # Keep init_config as an empty YAML object.
+    #
+    # This is important because the Edera plugin expects an object/map,
+    # rather than a YAML string.
+    #
+    cat > "$EDERA_CONFIG" <<'EOF'
+plugins:
+  - name: edera
+    library_path: /var/lib/edera/protect/falco/libedera_falco_plugin.so
+    init_config: {}
 
-    cat > "$EDERA_RULES" <<'EOF'
-# Edera Falco detection rules.
-#
-# Add Edera-specific detection rules here.
-#
-# The Edera plugin provides the event source:
-#
-#   edera_zone
-#
-# No source_plugin configuration is required in falco-edera-config.yaml.
-#
+load_plugins:
+  - edera
+
+source_plugin:
+  name: edera_zone
+  library_path: /var/lib/edera/protect/falco/libedera_falco_plugin.so
 EOF
 
-    chmod 0644 "$EDERA_RULES"
-
     ok "Created:"
-    echo "  ${EDERA_RULES}"
+    echo "  ${EDERA_CONFIG}"
+
+    show_file "$EDERA_CONFIG"
 
     # -----------------------------------------------------------------------
     # Step 9
     # -----------------------------------------------------------------------
 
-    section "Step 9: Validating Falco configuration"
+    section "Step 9: Writing Edera detection rules"
 
-    if falco --help 2>&1 | grep -q -- '--dry-run'; then
-        info "Running: falco --dry-run"
+    cat > "$EDERA_RULES" <<'EOF'
+# Edera Falco integration rules.
+#
+# The Edera event source is:
+#
+#   edera_zone
+#
+# Add Edera-specific Falco rules here.
+#
+EOF
 
-        if falco --dry-run >"$FALCO_VALIDATE_LOG" 2>&1; then
-            ok "Falco configuration validation passed"
-        else
-            error "Falco configuration validation failed"
-            echo
-            cat "$FALCO_VALIDATE_LOG"
-            echo
-            die "Refusing to restart Falco with an invalid configuration"
-        fi
+    ok "Created:"
+    echo "  ${EDERA_RULES}"
 
-        if grep -q "schema validation: failed" "$FALCO_VALIDATE_LOG"; then
-            error "Falco reported schema validation failure"
-            cat "$FALCO_VALIDATE_LOG"
-            die "Invalid Falco configuration"
-        fi
-
-        if grep -q "source_plugin" "$FALCO_VALIDATE_LOG"; then
-            error "Falco still sees source_plugin in the configuration"
-            cat "$FALCO_VALIDATE_LOG"
-            die "Unexpected source_plugin configuration detected"
-        fi
-
-        if grep -q "error in plugin edera init config" "$FALCO_VALIDATE_LOG"; then
-            error "Edera plugin init_config validation failed"
-            cat "$FALCO_VALIDATE_LOG"
-            die "Invalid Edera plugin init_config"
-        fi
-
-        if grep -q "Loaded plugin 'edera@" "$FALCO_VALIDATE_LOG"; then
-            ok "Edera plugin loaded successfully during validation"
-        else
-            warn "Edera plugin was not explicitly reported as loaded during dry-run"
-        fi
-    else
-        warn "This Falco build does not expose --dry-run"
-        warn "Continuing to service restart"
-    fi
+    show_file "$EDERA_RULES"
 
     # -----------------------------------------------------------------------
     # Step 10
     # -----------------------------------------------------------------------
 
-    section "Step 10: Checking registered Falco plugins"
+    section "Step 10: Validating Falco configuration"
 
-    if falco --list-plugins >"$FALCO_VALIDATE_LOG" 2>&1; then
-        if grep -q "Name: edera" "$FALCO_VALIDATE_LOG"; then
-            ok "Edera plugin is registered with Falco"
-        else
-            error "Edera plugin is NOT listed by Falco"
-            cat "$FALCO_VALIDATE_LOG"
-            die "Edera plugin registration failed"
-        fi
+    if ! validate_falco_config; then
+        error "Falco configuration validation failed."
+        warn "Falco was NOT restarted."
+        warn "Your existing running Falco service has been left untouched."
 
-        if grep -q "source='edera_zone'" "$FALCO_VALIDATE_LOG"; then
-            ok "Edera event source confirmed: edera_zone"
-        else
-            warn "edera_zone was not shown in the plugin capability output"
-        fi
-    else
-        error "falco --list-plugins failed"
-        cat "$FALCO_VALIDATE_LOG"
-        die "Unable to inspect Falco plugins"
+        die "Installation stopped because configuration validation failed."
     fi
 
     # -----------------------------------------------------------------------
     # Step 11
     # -----------------------------------------------------------------------
 
-    section "Step 11: Restarting Falco"
+    section "Step 11: Reloading systemd"
 
+    print_cmd systemctl daemon-reload
     systemctl daemon-reload
 
-    info "Restarting ${FALCO_SERVICE}..."
-
-    systemctl restart "$FALCO_SERVICE"
-
-    ok "Falco restart command completed"
+    ok "systemd configuration reloaded"
 
     # -----------------------------------------------------------------------
     # Step 12
     # -----------------------------------------------------------------------
 
-    section "Step 12: Waiting for Falco"
+    section "Step 12: Restarting Falco"
+
+    info "Restarting ${FALCO_SERVICE}..."
+
+    print_cmd systemctl restart "$FALCO_SERVICE"
+    systemctl restart "$FALCO_SERVICE"
+
+    ok "Falco restart command completed"
+
+    # -----------------------------------------------------------------------
+    # Step 13
+    # -----------------------------------------------------------------------
+
+    section "Step 13: Waiting for Falco"
 
     local attempts=0
 
@@ -1026,145 +1070,182 @@ EOF
         fi
 
         attempts=$((attempts + 1))
+
+        info "Waiting for Falco... (${attempts}/15)"
         sleep 1
     done
 
     if ! service_active; then
-        error "Falco did not become active"
+        error "Falco did not become active."
 
         echo
+        print_cmd systemctl status "$FALCO_SERVICE" --no-pager -l
         systemctl status "$FALCO_SERVICE" --no-pager -l || true
 
         echo
         warn "Recent logs:"
-        journalctl \
-            -u "$FALCO_SERVICE" \
-            -b \
-            -n 100 \
-            --no-pager || true
+
+        print_cmd journalctl -u "$FALCO_SERVICE" -n 100 --no-pager
+        journalctl -u "$FALCO_SERVICE" -n 100 --no-pager || true
 
         die "Falco startup failed"
     fi
 
     # -----------------------------------------------------------------------
-    # Step 13
+    # Step 14
     # -----------------------------------------------------------------------
 
-    section "Step 13: Verifying current Falco startup"
+    section "Step 14: Verifying Edera integration"
 
     sleep 2
 
+    echo
+    print_cmd systemctl status "$FALCO_SERVICE" --no-pager -l
     systemctl status "$FALCO_SERVICE" --no-pager -l || true
 
     echo
     info "Checking current-boot Edera messages..."
 
     local current_logs
-
-    current_logs="$(journalctl \
-        -u "$FALCO_SERVICE" \
-        -b \
-        -n 150 \
-        --no-pager 2>/dev/null || true)"
-
-    if grep -q "Loaded plugin 'edera@" <<<"$current_logs"; then
-        ok "Edera plugin loaded by running Falco"
-    else
-        error "Running Falco did not report loading Edera"
-    fi
-
-    if grep -q "edera_zone" <<<"$current_logs"; then
-        ok "edera_zone appears in current Falco logs"
-    else
-        warn "edera_zone not found in current Falco log output"
-    fi
-
-    if grep -q "schema validation failed" <<<"$current_logs"; then
-        error "Current Falco startup reported schema validation failure"
-    fi
-
-    if grep -q "error in plugin edera init config" <<<"$current_logs"; then
-        error "Current Falco startup reported Edera init_config failure"
-    fi
-
-    if grep -q "source_plugin" <<<"$current_logs"; then
-        error "Current Falco startup still references source_plugin"
-    fi
-
-    if grep -q "waiting for zones" <<<"$current_logs"; then
-        ok "Edera plugin is waiting for zones"
-        info "This is expected if no Edera zone is currently available."
-    fi
+    current_logs="$(get_current_boot_logs)"
 
     echo
-    echo -e "${BOLD}Relevant messages:${RESET}"
-
     grep -Ei \
         "edera|error|failed|warning|loaded event sources|enabled event sources|waiting for zones" \
         <<<"$current_logs" \
-        | tail -50 \
+        | tail -60 \
         || true
 
     # -----------------------------------------------------------------------
-    # Step 14
+    # Step 15
     # -----------------------------------------------------------------------
 
-    section "Step 14: Installation Summary"
+    section "Step 15: Installation Health Check"
 
-    local summary_failures=0
+    if run_check; then
+        echo
+        echo "============================================================"
+        echo -e "${GREEN}${BOLD}[ SUCCESS ] Falco + Edera installation completed${RESET}"
+        echo "============================================================"
+        echo
 
-    if service_active; then
-        ok "Falco service: ACTIVE"
+        info "Falco is active."
+        info "The Edera plugin is loaded."
+        info "No current Edera transport errors were detected."
+
     else
-        error "Falco service: INACTIVE"
-        summary_failures=$((summary_failures + 1))
-    fi
+        echo
+        echo "============================================================"
+        echo -e "${YELLOW}${BOLD}[ WARNING ] Installation completed, but health checks need attention${RESET}"
+        echo "============================================================"
+        echo
 
-    if [[ -f "$EDERA_PLUGIN" ]]; then
-        ok "Edera plugin: PRESENT"
-    else
-        error "Edera plugin: MISSING"
-        summary_failures=$((summary_failures + 1))
-    fi
+        warn "Falco itself may be running successfully."
+        warn "Review the Edera-specific health-check output above."
 
-    if [[ -f "$EDERA_CONFIG" ]]; then
-        ok "Edera config: PRESENT"
-    else
-        error "Edera config: MISSING"
-        summary_failures=$((summary_failures + 1))
-    fi
-
-    if [[ -f "$EDERA_RULES" ]]; then
-        ok "Edera rules: PRESENT"
-    else
-        error "Edera rules: MISSING"
-        summary_failures=$((summary_failures + 1))
-    fi
-
-    if [[ -S "$EDERA_SOCKET" ]]; then
-        ok "Edera socket: PRESENT"
-    else
-        warn "Edera socket: NOT PRESENT"
-        warn "This can be normal if the Edera daemon is not running."
+        echo
+        echo "Useful commands:"
+        echo
+        echo "  sudo $0 --check"
+        echo "  sudo $0 --status"
+        echo "  sudo $0 --logs"
+        echo "  sudo $0 --follow"
     fi
 
     echo
+}
 
-    if [[ "$summary_failures" -eq 0 ]]; then
-        echo -e "${GREEN}${BOLD}Installation/configuration completed successfully.${RESET}"
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+
+cleanup() {
+    require_root
+    require_command systemctl
+
+    section "Falco + Edera Cleanup"
+
+    warn "This removes the Edera-specific Falco configuration and rules."
+    warn "It does NOT uninstall Falco."
+    warn "It does NOT remove the Edera plugin."
+    warn "It does NOT remove the Edera daemon."
+    echo
+
+    read -r -p "Continue? [y/N] " answer
+
+    case "$answer" in
+        y|Y|yes|YES)
+            ;;
+        *)
+            info "Cleanup cancelled."
+            return 0
+            ;;
+    esac
+
+    echo
+
+    # -----------------------------------------------------------------------
+    # Stop Falco
+    # -----------------------------------------------------------------------
+
+    section "Cleanup Step 1: Stopping Falco"
+
+    if service_exists; then
+        print_cmd systemctl stop "$FALCO_SERVICE"
+        systemctl stop "$FALCO_SERVICE" || true
     else
-        echo -e "${RED}${BOLD}Installation completed with ${summary_failures} problem(s).${RESET}"
+        warn "Falco service does not exist."
+    fi
+
+    # -----------------------------------------------------------------------
+    # Back up existing configuration
+    # -----------------------------------------------------------------------
+
+    section "Cleanup Step 2: Backing up Edera configuration"
+
+    backup_file "$EDERA_CONFIG"
+    backup_file "$EDERA_RULES"
+
+    # -----------------------------------------------------------------------
+    # Remove Edera configuration
+    # -----------------------------------------------------------------------
+
+    section "Cleanup Step 3: Removing Edera Falco configuration"
+
+    print_cmd rm -f "$EDERA_CONFIG" "$EDERA_RULES"
+    rm -f "$EDERA_CONFIG" "$EDERA_RULES"
+
+    ok "Removed Edera Falco configuration files"
+
+    # -----------------------------------------------------------------------
+    # Reload systemd
+    # -----------------------------------------------------------------------
+
+    section "Cleanup Step 4: Reloading systemd"
+
+    print_cmd systemctl daemon-reload
+    systemctl daemon-reload
+
+    # -----------------------------------------------------------------------
+    # Restart Falco
+    # -----------------------------------------------------------------------
+
+    section "Cleanup Step 5: Restarting Falco"
+
+    if service_exists; then
+        print_cmd systemctl start "$FALCO_SERVICE"
+        systemctl start "$FALCO_SERVICE" || true
     fi
 
     echo
-    echo "Useful commands:"
+    ok "Cleanup complete."
     echo
-    echo "  sudo $0 --check"
-    echo "  sudo $0 --status"
-    echo "  sudo $0 --logs"
-    echo "  sudo $0 --follow"
-    echo "  sudo systemctl status ${FALCO_SERVICE} --no-pager -l"
-    echo
+
+    info "Falco itself was NOT uninstalled."
+    info "The Edera plugin binary was NOT removed."
+    info "The Edera daemon was NOT removed."
+    info "Backups are stored under:"
+    echo "  ${BACKUP_DIR}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1190,17 +1271,39 @@ Environment:
 
   LOG_LINES=200 sudo $0 --logs
 
+  FALCO_SERVICE=falco-modern-bpf.service sudo $0
+
 Service:
 
   ${FALCO_SERVICE}
 
-Edera plugin:
+Files:
 
-  ${EDERA_PLUGIN}
+  Falco config:
+    ${FALCO_MAIN_CONFIG}
 
-Edera event source:
+  Edera plugin:
+    ${EDERA_PLUGIN}
 
-  edera_zone
+  Edera socket:
+    ${EDERA_SOCKET}
+
+  Edera Falco config:
+    ${EDERA_CONFIG}
+
+  Edera Falco rules:
+    ${EDERA_RULES}
+
+  Backups:
+    ${BACKUP_DIR}
+
+The installer prints commands as they are executed using:
+
+  [CMD ]
+
+For example:
+
+  [CMD ] systemctl restart falco-modern-bpf.service
 
 EOF
 }
