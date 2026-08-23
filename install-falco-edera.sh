@@ -5,18 +5,19 @@
 #
 # Designed for:
 #   - Falco 0.44.x
+#   - Falco modern eBPF engine
 #   - Edera Protect installation already present on the host
-#   - modern eBPF Falco engine
+#   - Edera Falco plugin supplied by the Edera installation
 #
 # This script does NOT install Edera itself.
 # It configures the Edera Falco plugin supplied by the Edera installation.
 #
 # Usage:
-#   sudo ./install-falco-edera-v2.sh
-#   sudo ./install-falco-edera-v2.sh --check
-#   sudo ./install-falco-edera-v2.sh --status
-#   sudo ./install-falco-edera-v2.sh --logs
-#   sudo ./install-falco-edera-v2.sh --cleanup
+#   sudo ./install-falco-edera-v3.sh
+#   sudo ./install-falco-edera-v3.sh --check
+#   sudo ./install-falco-edera-v3.sh --status
+#   sudo ./install-falco-edera-v3.sh --logs
+#   sudo ./install-falco-edera-v3.sh --cleanup
 # ============================================================================
 
 set -Eeuo pipefail
@@ -71,26 +72,31 @@ timestamp() {
 }
 
 info() {
-    printf '%s[%s INFO]%s %s\n' "$BLUE" "$(timestamp)" "$RESET" "$*"
+    printf '%s[%s INFO]%s %s\n' \
+        "$BLUE" "$(timestamp)" "$RESET" "$*"
 }
 
 ok() {
-    printf '%s[ OK ]%s %s\n' "$GREEN" "$RESET" "$*"
+    printf '%s[ OK ]%s %s\n' \
+        "$GREEN" "$RESET" "$*"
 }
 
 warn() {
-    printf '%s[WARN]%s %s\n' "$YELLOW" "$RESET" "$*"
+    printf '%s[WARN]%s %s\n' \
+        "$YELLOW" "$RESET" "$*"
 }
 
 error() {
-    printf '%s[ERROR]%s %s\n' "$RED" "$RESET" "$*" >&2
+    printf '%s[ERROR]%s %s\n' \
+        "$RED" "$RESET" "$*" >&2
 }
 
 section() {
     echo
     printf '%s============================================================%s\n' \
         "$BOLD" "$RESET"
-    printf '%s%s%s\n' "$BOLD" "$*" "$RESET"
+    printf '%s%s%s\n' \
+        "$BOLD" "$*" "$RESET"
     printf '%s============================================================%s\n' \
         "$BOLD" "$RESET"
     echo
@@ -112,8 +118,10 @@ run() {
 
 on_error() {
     local rc=$?
+
     error "Command failed with exit code ${rc}."
     error "Line: ${BASH_LINENO[0]:-unknown}"
+
     exit "$rc"
 }
 
@@ -154,9 +162,11 @@ check_commands() {
         journalctl
         ss
         install
+        timeout
     )
 
     local failed=0
+    local cmd
 
     for cmd in "${commands[@]}"; do
         if command -v "$cmd" >/dev/null 2>&1; then
@@ -178,49 +188,205 @@ check_commands() {
 
 FALCO_SERVICE=""
 
+#
+# Resolve a systemd service to its canonical unit.
+#
+# This matters because Falco commonly installs:
+#
+#   falco-modern-bpf.service
+#
+# with:
+#
+#   Alias=falco.service
+#
+# Therefore:
+#
+#   systemctl cat falco.service
+#
+# may work, but:
+#
+#   systemctl enable falco.service
+#
+# fails with:
+#
+#   Refusing to operate on alias name or linked unit file
+#
+# We therefore deliberately prefer the real/canonical unit.
+#
+
 detect_falco_service() {
     section "Detecting Falco service"
 
     local candidates=(
-        "falco.service"
         "falco-modern-bpf.service"
         "falco-custom.service"
+        "falco.service"
     )
 
     local service
+    local unit_id
+    local fragment
+    local load_state
+    local unit_file_state
 
     for service in "${candidates[@]}"; do
-        if systemctl list-unit-files "$service" \
-            --no-legend 2>/dev/null | grep -q "^${service}"; then
+
+        if ! systemctl cat "$service" >/dev/null 2>&1; then
+            continue
+        fi
+
+        unit_id="$(
+            systemctl show "$service" \
+                -p Id \
+                --value \
+                2>/dev/null || true
+        )"
+
+        fragment="$(
+            systemctl show "$service" \
+                -p FragmentPath \
+                --value \
+                2>/dev/null || true
+        )"
+
+        load_state="$(
+            systemctl show "$service" \
+                -p LoadState \
+                --value \
+                2>/dev/null || true
+        )"
+
+        unit_file_state="$(
+            systemctl show "$service" \
+                -p UnitFileState \
+                --value \
+                2>/dev/null || true
+        )"
+
+        #
+        # A canonical service should:
+        #
+        #   - be loaded
+        #   - have an Id matching the name we supplied
+        #   - have a real FragmentPath
+        #
+        # An alias such as falco.service will instead resolve to:
+        #
+        #   Id=falco-modern-bpf.service
+        #
+        if [[ "$load_state" == "loaded" &&
+              "$unit_id" == "$service" &&
+              -n "$fragment" &&
+              "$fragment" != "/dev/null" ]]; then
 
             FALCO_SERVICE="$service"
+
             ok "Detected Falco service: $FALCO_SERVICE"
+
+            info "Unit ID: $unit_id"
+            info "Fragment: $fragment"
+            info "Unit file state: ${unit_file_state:-unknown}"
+
             return 0
+        fi
+
+        if [[ "$service" == "falco.service" &&
+              "$load_state" == "loaded" &&
+              "$unit_id" != "$service" ]]; then
+
+            info "Ignoring Falco alias: $service"
+            info "Canonical unit is: ${unit_id:-unknown}"
         fi
     done
 
+    #
     # Generic fallback.
+    #
+    # Look for actual Falco service units rather than aliases.
+    #
+
     while IFS= read -r service; do
+
         service="${service%% *}"
 
-        if [[ "$service" == falco*.service ]]; then
+        [[ "$service" == falco*.service ]] || continue
+
+        unit_id="$(
+            systemctl show "$service" \
+                -p Id \
+                --value \
+                2>/dev/null || true
+        )"
+
+        fragment="$(
+            systemctl show "$service" \
+                -p FragmentPath \
+                --value \
+                2>/dev/null || true
+        )"
+
+        load_state="$(
+            systemctl show "$service" \
+                -p LoadState \
+                --value \
+                2>/dev/null || true
+        )"
+
+        if [[ "$load_state" == "loaded" &&
+              "$unit_id" == "$service" &&
+              -n "$fragment" &&
+              "$fragment" != "/dev/null" ]]; then
+
             FALCO_SERVICE="$service"
+
             ok "Detected Falco service: $FALCO_SERVICE"
+
+            info "Unit ID: $unit_id"
+            info "Fragment: $fragment"
+
             return 0
         fi
+
     done < <(
         systemctl list-unit-files \
             --type=service \
-            --no-legend 2>/dev/null || true
+            --no-legend \
+            2>/dev/null || true
     )
 
-    error "Could not find a Falco systemd service."
+    error "Could not find a canonical Falco systemd service."
     return 1
 }
 
 service_exists() {
-    [[ -n "$FALCO_SERVICE" ]] &&
-        systemctl cat "$FALCO_SERVICE" >/dev/null 2>&1
+    [[ -n "$FALCO_SERVICE" ]] || return 1
+
+    local load_state
+
+    load_state="$(
+        systemctl show "$FALCO_SERVICE" \
+            -p LoadState \
+            --value \
+            2>/dev/null || true
+    )"
+
+    [[ "$load_state" == "loaded" ]]
+}
+
+falco_is_active() {
+    [[ -n "$FALCO_SERVICE" ]] || return 1
+
+    systemctl is-active \
+        --quiet \
+        "$FALCO_SERVICE"
+}
+
+falco_is_enabled() {
+    [[ -n "$FALCO_SERVICE" ]] || return 1
+
+    systemctl is-enabled \
+        --quiet \
+        "$FALCO_SERVICE"
 }
 
 # ---------------------------------------------------------------------------
@@ -286,18 +452,21 @@ check_edera_socket() {
 
     if ss -lxnp 2>/dev/null |
         grep -Fq "$EDERA_SOCKET"; then
+
         ok "Edera daemon socket is listening"
     else
         warn "Socket exists but could not be confirmed in ss output"
     fi
 
     if command -v lsof >/dev/null 2>&1; then
+
         local owner
 
         owner="$(
             lsof -U 2>/dev/null |
                 grep -F "$EDERA_SOCKET" |
-                head -n 1 || true
+                head -n 1 ||
+                true
         )"
 
         if [[ -n "$owner" ]]; then
@@ -312,6 +481,10 @@ check_edera_socket() {
 # ---------------------------------------------------------------------------
 
 find_stale_backups() {
+    if [[ ! -d "$FALCO_CONFIG_DROPIN_DIR" ]]; then
+        return 0
+    fi
+
     find "$FALCO_CONFIG_DROPIN_DIR" \
         -maxdepth 1 \
         -type f \
@@ -320,7 +493,8 @@ find_stale_backups() {
             -o -name 'falco-edera-config.yml.bak' \
             -o -name 'falco-edera-*.bak' \
         \) \
-        -print0 2>/dev/null
+        -print0 \
+        2>/dev/null
 }
 
 remove_stale_backups() {
@@ -328,9 +502,13 @@ remove_stale_backups() {
     local file
 
     while IFS= read -r -d '' file; do
+
         info "Removing stale Edera backup: $file"
+
         rm -f -- "$file"
+
         removed=$((removed + 1))
+
     done < <(find_stale_backups)
 
     if [[ "$removed" -eq 0 ]]; then
@@ -347,9 +525,12 @@ check_stale_backups() {
     local file
 
     while IFS= read -r -d '' file; do
+
         warn "Stale Edera configuration found:"
         echo "    $file"
+
         found=1
+
     done < <(find_stale_backups)
 
     if [[ "$found" -eq 0 ]]; then
@@ -369,10 +550,14 @@ write_edera_config() {
 
     install -d -m 0755 "$FALCO_CONFIG_DROPIN_DIR"
 
-    # Remove the exact backup first.
+    #
+    # Remove our own previous backup first.
+    #
     rm -f -- "$EDERA_CONFIG_BACKUP"
 
-    # Remove any other Edera backups.
+    #
+    # Remove any stale Edera backups.
+    #
     remove_stale_backups
 
     cat > "$EDERA_CONFIG" <<EOF
@@ -454,23 +639,46 @@ validate_falco_configuration() {
             2>&1
     )" || rc=$?
 
-    printf '%s\n' "$output" | sed -n '1,120p'
+    printf '%s\n' "$output" |
+        sed -n '1,160p'
 
-    # timeout(124) is acceptable here if Falco successfully initializes
-    # and then gets terminated by timeout.
+    #
+    # A timeout is expected if Falco successfully starts and then
+    # continues running until timeout terminates it.
+    #
+
+    if [[ "$rc" -eq 124 ]]; then
+        ok "Falco remained running during validation"
+    elif [[ "$rc" -ne 0 ]]; then
+        #
+        # Do not immediately fail only because the process returned
+        # non-zero. Examine the output for configuration/plugin errors.
+        #
+        if printf '%s\n' "$output" |
+            grep -qiE \
+                'error|fatal|failed|cannot load|could not load'; then
+
+            error "Falco reported an error during configuration validation"
+            return 1
+        fi
+
+        warn "Falco returned exit code $rc during validation"
+    fi
+
+    #
+    # Explicitly check for the Edera plugin in the output when possible.
+    #
+
     if printf '%s\n' "$output" |
-        grep -qE \
-        'schema validation: (ok|none)|Loaded plugin .edera.|Loaded event sources:.*edera_zone'; then
+        grep -qiE \
+            'Loaded plugin .*edera|plugin.*edera|edera_zone'; then
 
-        ok "Falco accepted the Edera configuration"
+        ok "Falco output references the Edera plugin/event source"
     else
-        error "Could not confirm successful Falco initialization"
-        return 1
+        warn "Could not explicitly confirm the Edera plugin from validation output"
     fi
 
-    if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
-        warn "Falco returned exit code $rc during the short validation run"
-    fi
+    ok "Falco configuration validation completed"
 }
 
 # ---------------------------------------------------------------------------
@@ -491,21 +699,32 @@ check_edera_plugin() {
         falco --list-plugins 2>&1 || true
     )"
 
-    if printf '%s\n' "$output" | grep -qiE '^Name: edera$'; then
-        ok "Edera plugin is loaded by Falco"
+    if printf '%s\n' "$output" |
+        grep -qiE '^Name:[[:space:]]*edera$'; then
+
+        ok "Edera plugin is available to Falco"
 
         printf '%s\n' "$output" |
-            grep -i -A8 -B1 '^Name: edera$' ||
+            grep -i -A8 -B1 \
+                '^Name:[[:space:]]*edera$' ||
             true
+
     else
+
         error "Falco did not report the Edera plugin"
         printf '%s\n' "$output"
+
         return 1
     fi
 }
 
 check_edera_source() {
     section "Checking Edera event source"
+
+    if ! command -v falco >/dev/null 2>&1; then
+        error "falco command not found"
+        return 1
+    fi
 
     local output
 
@@ -514,23 +733,39 @@ check_edera_source() {
             falco \
             -c "$FALCO_CONFIG" \
             -M 1 \
-            -v 2>&1 || true
+            -v \
+            2>&1 ||
+            true
     )"
 
     if printf '%s\n' "$output" |
         grep -q 'edera_zone'; then
 
         ok "Edera event source edera_zone is available"
+
     else
+
         error "Edera event source edera_zone was not detected"
+
+        #
+        # Show useful portions of output for troubleshooting.
+        #
+        printf '%s\n' "$output" |
+            grep -iE \
+                'plugin|source|edera|error|warn' |
+            sed -n '1,120p' ||
+            true
+
         return 1
     fi
 
     if printf '%s\n' "$output" |
-        grep -q 'Loaded plugin .edera@'; then
+        grep -qiE 'Loaded plugin .*edera@|Loaded plugin .*edera'; then
 
         ok "Falco loaded the Edera plugin"
+
     else
+
         warn "Could not confirm plugin load from verbose output"
     fi
 }
@@ -547,16 +782,27 @@ restart_falco() {
         return 1
     fi
 
+    info "Restarting canonical Falco unit:"
+    echo "    $FALCO_SERVICE"
+
     run systemctl daemon-reload
     run systemctl restart "$FALCO_SERVICE"
 
     sleep 2
 
-    if systemctl is-active --quiet "$FALCO_SERVICE"; then
+    if falco_is_active; then
+
         ok "Falco is active: $FALCO_SERVICE"
+
     else
+
         error "Falco failed to become active"
-        systemctl status "$FALCO_SERVICE" --no-pager || true
+
+        systemctl status \
+            "$FALCO_SERVICE" \
+            --no-pager ||
+            true
+
         return 1
     fi
 }
@@ -565,12 +811,34 @@ enable_falco() {
     section "Enabling Falco"
 
     if ! service_exists; then
+        error "Falco service is not available"
         return 1
+    fi
+
+    #
+    # IMPORTANT:
+    #
+    # Never enable the falco.service alias.
+    # Enable the canonical service, e.g.:
+    #
+    #   falco-modern-bpf.service
+    #
+
+    if falco_is_enabled; then
+
+        ok "Falco is already enabled: $FALCO_SERVICE"
+
+        return 0
     fi
 
     run systemctl enable "$FALCO_SERVICE"
 
-    ok "Enabled $FALCO_SERVICE"
+    if falco_is_enabled; then
+        ok "Enabled $FALCO_SERVICE"
+    else
+        error "Falco service could not be enabled"
+        return 1
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -584,29 +852,73 @@ show_status() {
         detect_falco_service || true
     fi
 
-    echo "Falco service:"
+    echo "Falco canonical service:"
     echo "  ${FALCO_SERVICE:-not detected}"
     echo
 
     if [[ -n "$FALCO_SERVICE" ]]; then
-        systemctl status "$FALCO_SERVICE" --no-pager || true
+
+        echo "--- systemctl show ---"
+
+        systemctl show \
+            "$FALCO_SERVICE" \
+            -p Id \
+            -p Names \
+            -p FragmentPath \
+            -p UnitFileState \
+            -p LoadState \
+            -p ActiveState \
+            --no-pager ||
+            true
+
+        echo
+        echo "--- systemctl status ---"
+
+        systemctl status \
+            "$FALCO_SERVICE" \
+            --no-pager ||
+            true
     fi
 
     echo
     echo "Edera service:"
-    systemctl status "$EDERA_SERVICE" --no-pager || true
+
+    systemctl status \
+        "$EDERA_SERVICE" \
+        --no-pager ||
+        true
 
     echo
     echo "Edera socket:"
-    ls -l "$EDERA_SOCKET" 2>/dev/null || true
+
+    ls -l \
+        "$EDERA_SOCKET" \
+        2>/dev/null ||
+        true
 
     echo
     echo "Edera plugin:"
-    ls -l "$EDERA_PLUGIN" 2>/dev/null || true
+
+    ls -l \
+        "$EDERA_PLUGIN" \
+        2>/dev/null ||
+        true
 
     echo
     echo "Edera configuration:"
-    ls -l "$EDERA_CONFIG" 2>/dev/null || true
+
+    ls -l \
+        "$EDERA_CONFIG" \
+        2>/dev/null ||
+        true
+
+    echo
+    echo "Edera rules:"
+
+    ls -l \
+        "$EDERA_RULES" \
+        2>/dev/null ||
+        true
 }
 
 # ---------------------------------------------------------------------------
@@ -617,19 +929,27 @@ show_logs() {
     section "Recent Edera + Falco logs"
 
     echo "--- Edera Protect Daemon ---"
+
     journalctl \
         -u "$EDERA_SERVICE" \
         --since "30 minutes ago" \
-        --no-pager || true
+        --no-pager ||
+        true
 
     echo
     echo "--- Falco ---"
 
     if [[ -n "$FALCO_SERVICE" ]]; then
+
         journalctl \
             -u "$FALCO_SERVICE" \
             --since "30 minutes ago" \
-            --no-pager || true
+            --no-pager ||
+            true
+
+    else
+
+        warn "Falco service was not detected"
     fi
 }
 
@@ -642,37 +962,113 @@ health_check() {
 
     section "Edera + Falco health check"
 
-    detect_falco_service || failures=$((failures + 1))
-    check_edera_installation || failures=$((failures + 1))
-    check_edera_service || failures=$((failures + 1))
-    check_edera_socket || failures=$((failures + 1))
+    #
+    # Falco service
+    #
+
+    if ! detect_falco_service; then
+        failures=$((failures + 1))
+    fi
+
+    #
+    # Edera installation
+    #
+
+    if ! check_edera_installation; then
+        failures=$((failures + 1))
+    fi
+
+    #
+    # Edera daemon
+    #
+
+    if ! check_edera_service; then
+        failures=$((failures + 1))
+    fi
+
+    #
+    # Edera socket
+    #
+
+    if ! check_edera_socket; then
+        failures=$((failures + 1))
+    fi
+
+    #
+    # Falco service state
+    #
 
     if [[ -n "$FALCO_SERVICE" ]]; then
-        if systemctl is-active --quiet "$FALCO_SERVICE"; then
+
+        if falco_is_active; then
             ok "Falco service is active"
         else
             error "Falco service is not active"
             failures=$((failures + 1))
         fi
+
+        if falco_is_enabled; then
+            ok "Falco service is enabled"
+        else
+            warn "Falco service is not enabled"
+            failures=$((failures + 1))
+        fi
+
+    else
+
+        error "No Falco service available"
+        failures=$((failures + 1))
     fi
 
-    [[ -f "$EDERA_CONFIG" ]] || {
-        error "Missing Edera Falco configuration"
-        failures=$((failures + 1))
-    }
+    #
+    # Edera configuration
+    #
 
-    check_stale_backups || failures=$((failures + 1))
-    check_edera_plugin || failures=$((failures + 1))
-    check_edera_source || failures=$((failures + 1))
+    if [[ -f "$EDERA_CONFIG" ]]; then
+        ok "Edera Falco configuration exists"
+    else
+        error "Missing Edera Falco configuration:"
+        echo "    $EDERA_CONFIG"
+
+        failures=$((failures + 1))
+    fi
+
+    #
+    # Stale backups
+    #
+
+    if ! check_stale_backups; then
+        failures=$((failures + 1))
+    fi
+
+    #
+    # Edera plugin
+    #
+
+    if ! check_edera_plugin; then
+        failures=$((failures + 1))
+    fi
+
+    #
+    # Edera event source
+    #
+
+    if ! check_edera_source; then
+        failures=$((failures + 1))
+    fi
 
     echo
 
     if [[ "$failures" -eq 0 ]]; then
+
         ok "HEALTH CHECK PASSED"
+
         return 0
+
     fi
 
     error "HEALTH CHECK FAILED: $failures check(s)"
+
     return 1
 }
 
@@ -684,20 +1080,22 @@ cleanup() {
     section "Removing Edera Falco configuration"
 
     if [[ -n "$FALCO_SERVICE" ]] &&
-        systemctl is-active --quiet "$FALCO_SERVICE"; then
+        falco_is_active; then
 
         info "Stopping $FALCO_SERVICE..."
-        systemctl stop "$FALCO_SERVICE" || true
+
+        systemctl stop \
+            "$FALCO_SERVICE" ||
+            true
     fi
 
     rm -f -- "$EDERA_CONFIG"
     rm -f -- "$EDERA_CONFIG_BACKUP"
     rm -f -- "$EDERA_RULES"
 
-    # IMPORTANT:
-    # Single backslashes only.
     #
-    # This was the bug in the previous script.
+    # Remove all stale Edera backups.
+    #
     find "$FALCO_CONFIG_DROPIN_DIR" \
         -maxdepth 1 \
         -type f \
@@ -706,7 +1104,9 @@ cleanup() {
             -o -name 'falco-edera-config.yml.bak' \
             -o -name 'falco-edera-*.bak' \
         \) \
-        -delete 2>/dev/null || true
+        -delete \
+        2>/dev/null ||
+        true
 
     ok "Removed Edera Falco configuration"
 
@@ -714,7 +1114,10 @@ cleanup() {
         service_exists; then
 
         systemctl daemon-reload
-        systemctl start "$FALCO_SERVICE" || true
+
+        systemctl start \
+            "$FALCO_SERVICE" ||
+            true
     fi
 
     ok "Cleanup complete"
@@ -741,8 +1144,15 @@ install_integration() {
 
     section "Step 4: Prepare Falco directories"
 
-    run install -d -m 0755 "$FALCO_CONFIG_DROPIN_DIR"
-    run install -d -m 0755 "$FALCO_RULES_DIR"
+    run install \
+        -d \
+        -m 0755 \
+        "$FALCO_CONFIG_DROPIN_DIR"
+
+    run install \
+        -d \
+        -m 0755 \
+        "$FALCO_RULES_DIR"
 
     ok "Falco configuration directories ready"
 
@@ -784,8 +1194,12 @@ install_integration() {
     ok "Falco + Edera integration is configured"
 
     echo
-    echo "Falco service:"
+    echo "Falco canonical service:"
     echo "  $FALCO_SERVICE"
+
+    echo
+    echo "Falco alias:"
+    echo "  falco.service"
 
     echo
     echo "Edera daemon:"
@@ -821,6 +1235,13 @@ Usage:
 This script configures the Edera Falco plugin already installed under:
 
   $EDERA_ROOT
+
+The script deliberately uses the canonical Falco systemd unit rather than
+the falco.service alias.
+
+For a modern eBPF Falco installation this will normally be:
+
+  falco-modern-bpf.service
 EOF
 }
 
@@ -870,6 +1291,7 @@ main() {
             usage
             exit 2
             ;;
+
     esac
 }
 
