@@ -166,7 +166,7 @@ sudo protect workload launch \
 
 **[Rule 5](https://docs.edera.dev/guides/observability/falco-integration/#detect-outbound-network-connections): Detect outbound network connections** <br/>
 Initiates an outbound network connection using ```nc``` to trigger the IPv4 socket connection detection. <br/>
-**FUN FACT:** This command triggers both the ```reverse shell``` attempt AND an ```outbound connection``` rules.
+**FUN FACT:** This command triggers both the ```reverse shell```rule AND the ```outbound connection``` rule.
 ```
 sudo protect workload launch \
   --zone test-zone \
