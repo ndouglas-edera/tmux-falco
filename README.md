@@ -184,7 +184,12 @@ grep '^- rule:' /etc/falco/rules.d/falco-edera-rules.yaml
 
 In **Tab B**:
 ```
-sudo journalctl -u falco-modern-bpf.service -f -o cat | grep --line-buffered -E "Critical|Warning|Notice|Error"
+sudo journalctl -u falco-modern-bpf.service -f -n 0 -o cat | awk '
+  /Critical/ { print "\033[1;31m" $0 "\033[0m"; next }
+  /Warning/  { print "\033[1;33m" $0 "\033[0m"; next }
+  /Notice/   { print "\033[1;34m" $0 "\033[0m"; next }
+  /Error/    { print "\033[1;31m" $0 "\033[0m"; next }
+'
 ```
 
 In **Tab A**:
