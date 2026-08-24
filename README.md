@@ -148,13 +148,13 @@ sudo ls -lh /var/lib/edera/protect/falco/libedera_falco_plugin.so
 
 Automating Falco
 ```
-wget https://raw.githubusercontent.com/ndouglas-edera/tmux-falco/refs/heads/main/install-falco-edera-v3.sh
-chmod +x install-falco-edera-v3.sh
+wget https://raw.githubusercontent.com/ndouglas-edera/tmux-falco/refs/heads/main/install-falco-edera-v4.sh
+chmod +x install-falco-edera-v4.sh
 ```
 
 Run the automation script:
 ```
-sudo ./install-falco-edera-v3.sh
+sudo ./install-falco-edera-v4.sh
 ```
 
 ## Testing Falco Rules
