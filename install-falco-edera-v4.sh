@@ -659,6 +659,65 @@ write_edera_rules() {
     (proc.cmdline contains "| sh" or
      proc.cmdline contains "| bash" or
      proc.cmdline contains "| ash")
+
+- rule: Edera Reconnaissance Tool Executed
+  desc: >
+    Detect execution of network or system discovery tools commonly used
+    during container post-exploitation inside an Edera zone.
+  source: edera_zone
+  output: >
+    Reconnaissance tool executed in zone
+    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline user=%user.name)
+  priority: WARNING
+  condition: >
+    evt.pluginname == "edera" and
+    evt.type in (execve, execveat) and
+    proc.name in (nmap, ip, ss, netstat, arp, route, dig, nslookup, lsof)
+
+- rule: Edera Execution from Unsafe Directory
+  desc: >
+    Detect binary execution originating from temporary or shared memory paths inside an Edera zone.
+  source: edera_zone
+  output: >
+    Execution from ephemeral directory in zone
+    (zone_id=%edera.zone.id proc=%proc.exe path=%proc.exepath cmdline=%proc.cmdline)
+  priority: WARNING
+  condition: >
+    evt.pluginname == "edera" and
+    evt.type in (execve, execveat) and
+    (proc.exepath startswith /tmp or
+     proc.exepath startswith /var/tmp or
+     proc.exepath startswith /dev/shm)
+
+- rule: Edera Unexpected Shell Spawn
+  desc: >
+    Detect shell processes spawned by non-standard parent executables inside an Edera zone.
+  source: edera_zone
+  output: >
+    Unexpected shell child process in zone
+    (zone_id=%edera.zone.id shell=%proc.name parent=%proc.pname cmdline=%proc.cmdline)
+  priority: CRITICAL
+  condition: >
+    evt.pluginname == "edera" and
+    evt.type in (execve, execveat) and
+    proc.name in (sh, bash, ash, zsh) and
+    proc.pname in (python, python3, node, java, nginx, httpd)
+
+- rule: Edera Shell History Wiped
+  desc: >
+    Detect attempts to clear or redirect shell history files inside an Edera zone.
+  source: edera_zone
+  output: >
+    Shell history alteration or wipe detected in zone
+    (zone_id=%edera.zone.id proc=%proc.exe file=%fd.name cmdline=%proc.cmdline)
+  priority: WARNING
+  condition: >
+    evt.pluginname == "edera" and
+    evt.type in (open, openat, truncate) and
+    (fd.name endswith .bash_history or
+     fd.name endswith .ash_history or
+     fd.name endswith .zsh_history) and
+    proc.cmdline contains "/dev/null"
 EOF
 
     chmod 0644 "$EDERA_RULES"
