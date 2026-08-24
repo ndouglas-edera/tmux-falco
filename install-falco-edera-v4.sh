@@ -6,11 +6,10 @@
 # Designed for:
 #   - Falco 0.44.x
 #   - Falco modern eBPF engine
-#   - Edera Protect already installed on the host
+#   - Edera Protect already installed
 #   - Edera Falco plugin supplied by the Edera installation
 #
 # This script does NOT install Edera itself.
-# It configures the Edera Falco plugin supplied by the Edera installation.
 #
 # Usage:
 #   sudo ./install-falco-edera-v5.sh
@@ -41,11 +40,14 @@ readonly EDERA_RULES="${FALCO_RULES_DIR}/falco-edera-rules.yaml"
 
 readonly EDERA_SERVICE="protect-daemon.service"
 
-# ---------------------------------------------------------------------------
-# Required managed Edera rules
+# Falco validation duration.
 #
-# Additional/custom rules are allowed.
-# The installer only requires these six rules to exist.
+# Falco is a daemon and normally does NOT exit by itself after loading the
+# configuration. Therefore a timeout is expected during validation.
+readonly FALCO_VALIDATION_TIMEOUT=10
+
+# ---------------------------------------------------------------------------
+# Required Edera rules
 # ---------------------------------------------------------------------------
 
 readonly REQUIRED_EDERA_RULES=(
@@ -169,6 +171,7 @@ check_commands() {
         ss
         install
         timeout
+        mktemp
     )
 
     local failed=0
@@ -182,13 +185,6 @@ check_commands() {
             failed=1
         fi
     done
-
-    if command -v falco >/dev/null 2>&1; then
-        ok "falco"
-    else
-        error "Missing command: falco"
-        failed=1
-    fi
 
     if [[ "$failed" -ne 0 ]]; then
         return 1
@@ -360,7 +356,7 @@ falco_is_enabled() {
 }
 
 # ---------------------------------------------------------------------------
-# Edera checks
+# Edera installation checks
 # ---------------------------------------------------------------------------
 
 check_edera_installation() {
@@ -429,7 +425,9 @@ check_edera_socket() {
         grep -Fq "$EDERA_SOCKET"; then
 
         ok "Edera daemon socket is listening"
+
     else
+
         warn "Socket exists but could not be confirmed in ss output"
     fi
 
@@ -452,7 +450,7 @@ check_edera_socket() {
 }
 
 # ---------------------------------------------------------------------------
-# Stale configuration
+# Stale configuration handling
 # ---------------------------------------------------------------------------
 
 find_stale_backups() {
@@ -552,19 +550,13 @@ EOF
 # Edera Falco rules
 #
 # IMPORTANT:
-# Keep output expressions deliberately conservative.
 #
-# The Edera plugin has already demonstrated support for:
-#   %edera.zone.id
-#   %proc.exe
-#   %proc.cmdline
-#   %fd.name
-#   %fd.rip
-#   %fd.rport
-#   %fd.l4proto
+# The Edera plugin is providing the event source:
 #
-# Avoid additional output fields unless the plugin/Falco installation
-# explicitly exposes them.
+#     edera_zone
+#
+# The output fields below deliberately avoid complicated expressions inside
+# the output string. Falco 0.44.x validates output fields strictly.
 # ---------------------------------------------------------------------------
 
 write_edera_rules() {
@@ -580,7 +572,7 @@ write_edera_rules() {
 #
 #   edera_zone
 #
-# These rules are managed by the Edera + Falco installer.
+# Managed by the Edera + Falco installer.
 # ============================================================================
 
 - rule: Edera Proc Environ Read
@@ -590,8 +582,8 @@ write_edera_rules() {
     technique for extracting secrets from neighboring workloads.
   source: edera_zone
   output: >
-    Credential harvesting attempt in zone
-    (zone_id=%edera.zone.id proc=%proc.exe file=%fd.name)
+    Credential harvesting attempt in Edera zone
+    (proc=%proc.name file=%fd.name)
   priority: WARNING
   condition: >
     evt.pluginname == "edera" and
@@ -601,11 +593,10 @@ write_edera_rules() {
 - rule: Edera Reverse Shell Tool
   desc: >
     Detect execution of common reverse shell tools inside an Edera zone.
-    Legitimate workloads rarely invoke netcat, socat, or similar tools.
   source: edera_zone
   output: >
-    Reverse shell tool executed in zone
-    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
+    Reverse shell tool executed in Edera zone
+    (proc=%proc.name cmdline=%proc.cmdline)
   priority: CRITICAL
   condition: >
     evt.pluginname == "edera" and
@@ -616,11 +607,11 @@ write_edera_rules() {
   desc: >
     Detect nsenter execution inside an Edera zone.
     nsenter is commonly used in container escape and privilege
-    escalation attacks to enter host or other container namespaces.
+    escalation attacks to enter other namespaces.
   source: edera_zone
   output: >
-    Namespace escape attempt in zone
-    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
+    Namespace escape attempt in Edera zone
+    (proc=%proc.name cmdline=%proc.cmdline)
   priority: CRITICAL
   condition: >
     evt.pluginname == "edera" and
@@ -633,8 +624,8 @@ write_edera_rules() {
     including credential stores and security-critical configuration.
   source: edera_zone
   output: >
-    Sensitive file read in zone
-    (zone_id=%edera.zone.id proc=%proc.exe file=%fd.name)
+    Sensitive file read in Edera zone
+    (proc=%proc.name file=%fd.name)
   priority: WARNING
   condition: >
     evt.pluginname == "edera" and
@@ -648,8 +639,8 @@ write_edera_rules() {
     Detect outbound network connections from Edera zones.
   source: edera_zone
   output: >
-    Outbound connection from zone
-    (zone_id=%edera.zone.id proc=%proc.exe dest=%fd.rip:%fd.rport proto=%fd.l4proto)
+    Outbound connection from Edera zone
+    (proc=%proc.name dest=%fd.rip:%fd.rport proto=%fd.l4proto)
   priority: NOTICE
   condition: >
     evt.pluginname == "edera" and
@@ -662,25 +653,26 @@ write_edera_rules() {
     into shell interpreters inside an Edera zone.
   source: edera_zone
   output: >
-    In-memory script execution attempt in zone
-    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
+    In-memory script execution attempt in Edera zone
+    (proc=%proc.name cmdline=%proc.cmdline)
   priority: CRITICAL
   condition: >
     evt.pluginname == "edera" and
     evt.type in (execve, execveat) and
-    (proc.cmdline contains "curl" or proc.cmdline contains "wget") and
+    (proc.cmdline contains "curl" or
+     proc.cmdline contains "wget") and
     (proc.cmdline contains "| sh" or
      proc.cmdline contains "| bash" or
      proc.cmdline contains "| ash")
 
 - rule: Edera Reconnaissance Tool Executed
   desc: >
-    Detect execution of network or system discovery tools commonly used
-    during container post-exploitation inside an Edera zone.
+    Detect execution of network or system discovery tools commonly
+    used during container post-exploitation.
   source: edera_zone
   output: >
-    Reconnaissance tool executed in zone
-    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
+    Reconnaissance tool executed in Edera zone
+    (proc=%proc.name cmdline=%proc.cmdline user=%user.name)
   priority: WARNING
   condition: >
     evt.pluginname == "edera" and
@@ -693,8 +685,8 @@ write_edera_rules() {
     paths inside an Edera zone.
   source: edera_zone
   output: >
-    Execution from ephemeral directory in zone
-    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
+    Execution from ephemeral directory in Edera zone
+    (proc=%proc.name path=%proc.exepath cmdline=%proc.cmdline)
   priority: WARNING
   condition: >
     evt.pluginname == "edera" and
@@ -709,8 +701,8 @@ write_edera_rules() {
     inside an Edera zone.
   source: edera_zone
   output: >
-    Unexpected shell child process in zone
-    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
+    Unexpected shell child process in Edera zone
+    (shell=%proc.name parent=%proc.pname cmdline=%proc.cmdline)
   priority: CRITICAL
   condition: >
     evt.pluginname == "edera" and
@@ -724,8 +716,8 @@ write_edera_rules() {
     an Edera zone.
   source: edera_zone
   output: >
-    Shell history alteration or wipe detected in zone
-    (zone_id=%edera.zone.id proc=%proc.exe file=%fd.name)
+    Shell history alteration or wipe detected in Edera zone
+    (proc=%proc.name file=%fd.name cmdline=%proc.cmdline)
   priority: WARNING
   condition: >
     evt.pluginname == "edera" and
@@ -748,24 +740,19 @@ EOF
 
 # ---------------------------------------------------------------------------
 # Edera rules inspection
-#
-# This implementation intentionally avoids fragile arithmetic expressions.
 # ---------------------------------------------------------------------------
 
 get_edera_rule_count() {
     local count
 
     count="$(
-        grep -cE '^[[:space:]]*-[[:space:]]*rule:' "$EDERA_RULES" 2>/dev/null || true
+        grep -cE \
+            '^[[:space:]]*-[[:space:]]rule:' \
+            "$EDERA_RULES" \
+            2>/dev/null || true
     )"
 
-    # grep can return an empty result in unusual cases.
-    # Always return a valid integer.
-    if [[ ! "$count" =~ ^[0-9]+$ ]]; then
-        count=0
-    fi
-
-    printf '%s\n' "$count"
+    printf '%s\n' "${count:-0}"
 }
 
 check_edera_rules_file() {
@@ -784,29 +771,20 @@ check_edera_rules_file() {
     fi
 
     local rule_count
-    local required_count
-    local custom_count
-    local rule
-    local missing=0
 
-    # IMPORTANT:
-    # Keep assignment and command substitution on a normal assignment line.
-    # Do not place the variable expansion on a separate line.
     rule_count="$(get_edera_rule_count)"
 
-    required_count="${#REQUIRED_EDERA_RULES[@]}"
-
-    if [[ ! "$rule_count" =~ ^[0-9]+$ ]]; then
+    if ! [[ "$rule_count" =~ ^[0-9]+$ ]]; then
         error "Could not determine Edera rule count"
         return 1
     fi
 
-    if (( rule_count < required_count )); then
-        error "Expected at least ${required_count} Edera rules, found ${rule_count}"
+    if (( rule_count < ${#REQUIRED_EDERA_RULES[@]} )); then
+        error "Expected at least ${#REQUIRED_EDERA_RULES[@]} Edera rules, found $rule_count"
 
         echo
         grep -nE \
-            '^[[:space:]]*-[[:space:]]*rule:' \
+            '^[[:space:]]*-[[:space:]]rule:' \
             "$EDERA_RULES" ||
             true
 
@@ -814,13 +792,19 @@ check_edera_rules_file() {
     fi
 
     ok "Edera rules file exists"
-    ok "Found ${rule_count} Edera rules"
+    ok "Found $rule_count Edera rules"
 
-    if (( rule_count > required_count )); then
-        custom_count=$((rule_count - required_count))
+    if (( rule_count > ${#REQUIRED_EDERA_RULES[@]} )); then
+        local custom_count
 
-        ok "Additional/custom rules detected: ${custom_count}"
+        custom_count=$(
+            (( rule_count - ${#REQUIRED_EDERA_RULES[@]} ))
+        )
+
+        ok "Additional/custom rules detected: $custom_count"
     fi
+
+    local rule
 
     for rule in "${REQUIRED_EDERA_RULES[@]}"; do
 
@@ -828,25 +812,18 @@ check_edera_rules_file() {
             ok "Rule present: $rule"
         else
             error "Missing required Edera rule: $rule"
-            missing=$((missing + 1))
+            return 1
         fi
 
     done
-
-    if (( missing > 0 )); then
-        error "Missing ${missing} required Edera rule(s)"
-        return 1
-    fi
 
     echo
     echo "--- Installed Edera rule names ---"
 
     grep -nE \
-        '^[[:space:]]*-[[:space:]]*rule:' \
+        '^[[:space:]]*-[[:space:]]rule:' \
         "$EDERA_RULES" ||
         true
-
-    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -879,109 +856,160 @@ validate_falco_configuration() {
         return 1
     fi
 
-    info "Running Falco configuration validation..."
-
-    local output=""
+    local output_file
     local rc=0
 
-    set +e
-
-    output="$(
-        timeout 15 \
-            falco \
-            -c "$FALCO_CONFIG" \
-            -M 1 \
-            2>&1
+    output_file="$(
+        mktemp /tmp/falco-edera-validation.XXXXXX
     )"
+
+    # Always remove temporary validation output.
+    cleanup_validation_file() {
+        rm -f -- "$output_file"
+    }
+
+    trap cleanup_validation_file RETURN
+
+    info "Running Falco configuration validation..."
+    info "Falco will be allowed to run for ${FALCO_VALIDATION_TIMEOUT}s."
+    info "A timeout is expected if configuration loads successfully."
+
+    #
+    # IMPORTANT:
+    #
+    # Do not use:
+    #
+    #   output="$(timeout ...)" || rc=$?
+    #
+    # here.
+    #
+    # With set -Eeuo pipefail and a global ERR trap, timeout's expected
+    # exit status 124 can still trigger the ERR trap through command
+    # substitution.
+    #
+    # Instead, temporarily disable ERR handling around the expected
+    # non-zero command.
+    #
+    trap - ERR
+
+    timeout \
+        --signal=TERM \
+        --kill-after=3s \
+        "${FALCO_VALIDATION_TIMEOUT}s" \
+        falco \
+        -c "$FALCO_CONFIG" \
+        -M 1 \
+        >"$output_file" \
+        2>&1
 
     rc=$?
 
-    set -e
+    trap on_error ERR
 
-    printf '%s\n' "$output" |
-        sed -n '1,240p'
+    #
+    # Display Falco's actual output regardless of exit status.
+    #
+    sed -n '1,240p' "$output_file"
 
-    # timeout itself returning 124 means Falco stayed alive for the
-    # validation period. That is expected.
+    echo
+
+    #
+    # Exit code 124 is EXPECTED when timeout terminates Falco after
+    # successful initialization.
+    #
     if [[ "$rc" -eq 124 ]]; then
 
-        ok "Falco remained running during validation"
+        info "Falco reached the validation timeout."
 
-    elif [[ "$rc" -ne 0 ]]; then
+        #
+        # Look for actual configuration/rule/plugin errors.
+        #
+        if grep -qiE \
+            'LOAD_ERR_|Error: .*Invalid|configuration.*error|failed to load|cannot load|could not load|fatal error|unknown filter|schema validation.*failed' \
+            "$output_file"; then
 
-        error "Falco exited with code $rc during configuration validation"
+            error "Falco reported a configuration, plugin, or rule error during validation"
 
-        if printf '%s\n' "$output" |
-            grep -qiE \
-                'error:|fatal|failed|invalid|cannot load|could not load|LOAD_ERR|compile error'; then
+            echo
+            echo "--- Relevant Falco errors ---"
 
-            error "Falco reported a configuration/plugin/rule error"
+            grep -iE \
+                'LOAD_ERR_|Error:|Invalid|failed|cannot|could not|fatal|unknown filter' \
+                "$output_file" |
+                sed -n '1,160p' ||
+                true
+
             return 1
         fi
 
-        warn "Falco returned exit code $rc without a recognised error string"
+        #
+        # We expect both of these when the Edera integration is loaded.
+        #
+        if grep -q \
+            "Loaded plugin 'edera@" \
+            "$output_file"; then
 
-        return 1
+            ok "Falco loaded the Edera plugin"
+
+        else
+
+            error "Falco timed out but did not report loading the Edera plugin"
+            return 1
+        fi
+
+        if grep -q \
+            "rules.d/falco-edera-rules.yaml | schema validation: ok" \
+            "$output_file"; then
+
+            ok "Edera rules file passed Falco schema validation"
+
+        else
+
+            error "Edera rules file was not confirmed as schema-valid"
+            return 1
+        fi
+
+        ok "Falco configuration validation passed"
+
+        return 0
     fi
 
-    # -----------------------------------------------------------------------
-    # Plugin verification
-    # -----------------------------------------------------------------------
-
-    if printf '%s\n' "$output" |
-        grep -qiE \
-            "Loaded plugin 'edera@|Loaded plugin .*edera"; then
-
-        ok "Falco loaded the Edera plugin"
-
-    else
-
-        error "Falco validation did not confirm the Edera plugin"
-
-        return 1
-    fi
-
-    # -----------------------------------------------------------------------
-    # Edera source verification
-    # -----------------------------------------------------------------------
-
-    if printf '%s\n' "$output" |
-        grep -q 'edera_zone'; then
-
-        ok "Falco validation references Edera event source: edera_zone"
-
-    else
-
-        warn "Falco validation output did not explicitly mention edera_zone"
-        warn "The plugin itself was loaded successfully."
-    fi
-
-    # -----------------------------------------------------------------------
-    # Rule validation
     #
-    # Do not require Falco's startup output to print every rule name.
-    # The actual authority here is Falco returning successfully after
-    # loading the rules file.
-    # -----------------------------------------------------------------------
+    # Exit code 0 means Falco exited cleanly.
+    #
+    if [[ "$rc" -eq 0 ]]; then
 
-    if printf '%s\n' "$output" |
-        grep -q \
-            "$EDERA_RULES.*schema validation: ok"; then
+        ok "Falco exited cleanly during validation"
 
-        ok "Edera rules file passed Falco schema validation"
+        if grep -q \
+            "Loaded plugin 'edera@" \
+            "$output_file"; then
 
-    elif printf '%s\n' "$output" |
-        grep -q \
-            "$EDERA_RULES"; then
+            ok "Falco loaded the Edera plugin"
 
-        ok "Falco loaded the Edera rules file"
+        else
 
-    else
+            warn "Falco exited cleanly but Edera plugin load was not explicitly reported"
+        fi
 
-        warn "Could not find an explicit Edera rules-file message in Falco output"
+        return 0
     fi
 
-    ok "Falco configuration validation completed"
+    #
+    # Any other exit code is a genuine failure.
+    #
+    error "Falco validation failed with exit code $rc"
+
+    echo
+    echo "--- Relevant Falco errors ---"
+
+    grep -iE \
+        'LOAD_ERR_|Error:|Invalid|failed|cannot|could not|fatal|unknown filter|schema' \
+        "$output_file" |
+        sed -n '1,200p' ||
+        true
+
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -999,17 +1027,19 @@ check_edera_plugin() {
     local output
 
     output="$(
-        falco --list-plugins 2>&1 || true
+        falco --list-plugins 2>&1 ||
+        true
     )"
 
     if printf '%s\n' "$output" |
-        grep -qiE '^Name:[[:space:]]*edera$'; then
+        grep -qiE \
+            '(^|[[:space:]])Name:[[:space:]]*edera([[:space:]]|$)'; then
 
         ok "Edera plugin is available to Falco"
 
         printf '%s\n' "$output" |
             grep -i -A8 -B1 \
-                '^Name:[[:space:]]*edera$' ||
+                'Name:[[:space:]]*edera' ||
             true
 
     else
@@ -1029,51 +1059,77 @@ check_edera_source() {
         return 1
     fi
 
-    local output=""
+    local output_file
     local rc=0
 
-    set +e
-
-    output="$(
-        timeout 15 \
-            falco \
-            -c "$FALCO_CONFIG" \
-            -M 1 \
-            -v \
-            2>&1
+    output_file="$(
+        mktemp /tmp/falco-edera-source.XXXXXX
     )"
+
+    trap 'rm -f -- "$output_file"' RETURN
+
+    trap - ERR
+
+    timeout \
+        --signal=TERM \
+        --kill-after=3s \
+        10s \
+        falco \
+        -c "$FALCO_CONFIG" \
+        -M 1 \
+        -v \
+        >"$output_file" \
+        2>&1
 
     rc=$?
 
-    set -e
+    trap on_error ERR
 
-    if printf '%s\n' "$output" |
-        grep -q 'edera_zone'; then
+    if grep -q 'edera_zone' "$output_file"; then
 
         ok "Edera event source edera_zone is available"
 
     else
 
-        error "Edera event source edera_zone was not detected"
+        #
+        # Do not immediately fail solely because verbose output didn't
+        # print the source name. The plugin load itself is authoritative
+        # for this check.
+        #
+        if grep -q "Loaded plugin 'edera@" "$output_file"; then
 
-        printf '%s\n' "$output" |
+            ok "Edera plugin loaded successfully"
+
+        else
+
+            error "Edera event source/plugin could not be confirmed"
+
             grep -iE \
-                'plugin|source|edera|error|warn' |
-            sed -n '1,160p' ||
-            true
+                'plugin|source|edera|error|warn' \
+                "$output_file" |
+                sed -n '1,160p' ||
+                true
 
-        return 1
+            return 1
+        fi
     fi
 
-    if printf '%s\n' "$output" |
-        grep -qiE \
-            "Loaded plugin 'edera@|Loaded plugin .*edera"; then
+    if grep -qiE \
+        "Loaded plugin 'edera@" \
+        "$output_file"; then
 
         ok "Falco loaded the Edera plugin"
 
     else
 
-        warn "Could not confirm plugin load from verbose output"
+        warn "Could not confirm Edera plugin load from verbose output"
+    fi
+
+    #
+    # timeout(124) is expected here too.
+    #
+    if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
+        warn "Falco verbose validation returned exit code $rc"
     fi
 
     return 0
@@ -1097,7 +1153,7 @@ restart_falco() {
     run systemctl daemon-reload
     run systemctl restart "$FALCO_SERVICE"
 
-    sleep 3
+    sleep 2
 
     if falco_is_active; then
 
@@ -1109,15 +1165,6 @@ restart_falco() {
 
         systemctl status \
             "$FALCO_SERVICE" \
-            --no-pager ||
-            true
-
-        echo
-        echo "--- Recent Falco journal ---"
-
-        journalctl \
-            -u "$FALCO_SERVICE" \
-            --since "2 minutes ago" \
             --no-pager ||
             true
 
@@ -1234,15 +1281,14 @@ show_status() {
 
     if [[ -f "$EDERA_RULES" ]]; then
 
-        grep -E \
-            '^[[:space:]]*-[[:space:]]*rule:' \
+        grep -nE \
+            '^[[:space:]]*-[[:space:]]rule:' \
             "$EDERA_RULES" ||
             true
 
     else
 
         warn "Edera rules file does not exist"
-
     fi
 }
 
@@ -1361,7 +1407,6 @@ health_check() {
         ok "HEALTH CHECK PASSED"
 
         return 0
-
     fi
 
     error "HEALTH CHECK FAILED: $failures check(s)"
@@ -1526,8 +1571,8 @@ install_integration() {
     echo
     echo "Edera rules installed:"
 
-    grep -E \
-        '^[[:space:]]*-[[:space:]]*rule:' \
+    grep -nE \
+        '^[[:space:]]*-[[:space:]]rule:' \
         "$EDERA_RULES" ||
         true
 }
@@ -1565,7 +1610,7 @@ Edera Falco detection rules:
 
   $EDERA_RULES
 
-The installer requires these built-in Edera rules:
+Required Edera rules:
 
   - Edera Proc Environ Read
   - Edera Reverse Shell Tool
@@ -1574,11 +1619,7 @@ The installer requires these built-in Edera rules:
   - Edera Outbound Connection
   - Edera Shell Pipe Execution
 
-Additional/custom rules are allowed and will not cause the rule-count
-validation to fail.
-
-The installer validates the complete Falco configuration before restarting
-the Falco service.
+Additional/custom rules are allowed.
 EOF
 }
 
