@@ -672,6 +672,21 @@ write_edera_rules() {
     evt.pluginname == "edera" and
     evt.type == connect and
     fd.type == ipv4
+
+- rule: Edera Shell Pipe Execution
+  desc: >
+    Detect pipeline execution where web fetching tools stream directly
+    into shell interpreters inside an Edera zone.
+  source: edera_zone
+  output: >
+    In-memory script execution attempt in zone
+    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
+  priority: CRITICAL
+  condition: >
+    evt.pluginname == "edera" and
+    evt.type in (execve, execveat) and
+    (proc.cmdline contains "curl" or proc.cmdline contains "wget") and
+    (proc.cmdline contains "| sh" or proc.cmdline contains "| bash" or proc.cmdline contains "| ash")
 EOF
 
     chmod 0644 "$EDERA_RULES"
