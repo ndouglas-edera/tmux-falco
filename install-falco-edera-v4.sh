@@ -10,6 +10,7 @@
 #   - Edera Falco plugin supplied by the Edera installation
 #
 # This script does NOT install Edera itself.
+# It configures the Edera Falco plugin supplied by the Edera installation.
 #
 # Usage:
 #   sudo ./install-falco-edera-v5.sh
@@ -35,12 +36,16 @@ readonly FALCO_CONFIG_DROPIN_DIR="/etc/falco/config.d"
 readonly FALCO_RULES_DIR="/etc/falco/rules.d"
 
 readonly EDERA_CONFIG="${FALCO_CONFIG_DROPIN_DIR}/falco-edera-config.yaml"
+readonly EDERA_CONFIG_BACKUP="${EDERA_CONFIG}.bak"
 readonly EDERA_RULES="${FALCO_RULES_DIR}/falco-edera-rules.yaml"
 
 readonly EDERA_SERVICE="protect-daemon.service"
 
 # ---------------------------------------------------------------------------
 # Required managed Edera rules
+#
+# Additional/custom rules are allowed.
+# The installer only requires these six rules to exist.
 # ---------------------------------------------------------------------------
 
 readonly REQUIRED_EDERA_RULES=(
@@ -115,6 +120,7 @@ section() {
 
 run() {
     printf '%s$%s' "$CYAN" "$RESET"
+
     printf ' %q' "$@"
     echo
 
@@ -137,24 +143,15 @@ on_error() {
 trap on_error ERR
 
 # ---------------------------------------------------------------------------
-# Root / command requirements
+# Requirements
 # ---------------------------------------------------------------------------
 
 require_root() {
     if [[ "${EUID}" -ne 0 ]]; then
-        error "This script must be run as root."
+        error "Run this script as root:"
         echo
         echo "  sudo $0"
         exit 1
-    fi
-}
-
-require_command() {
-    local command_name="$1"
-
-    if ! command -v "$command_name" >/dev/null 2>&1; then
-        error "Required command not found: $command_name"
-        return 1
     fi
 }
 
@@ -163,17 +160,14 @@ check_commands() {
 
     local commands=(
         bash
-        cat
-        date
         find
         grep
-        install
-        journalctl
-        ls
-        rm
         sed
-        ss
+        awk
         systemctl
+        journalctl
+        ss
+        install
         timeout
     )
 
@@ -189,11 +183,11 @@ check_commands() {
         fi
     done
 
-    if ! command -v falco >/dev/null 2>&1; then
+    if command -v falco >/dev/null 2>&1; then
+        ok "falco"
+    else
         error "Missing command: falco"
         failed=1
-    else
-        ok "falco"
     fi
 
     if [[ "$failed" -ne 0 ]]; then
@@ -207,44 +201,8 @@ check_commands() {
 
 FALCO_SERVICE=""
 
-is_canonical_service() {
-    local service="$1"
-
-    local id
-    local fragment
-    local load_state
-
-    id="$(
-        systemctl show "$service" \
-            -p Id \
-            --value \
-            2>/dev/null || true
-    )"
-
-    fragment="$(
-        systemctl show "$service" \
-            -p FragmentPath \
-            --value \
-            2>/dev/null || true
-    )"
-
-    load_state="$(
-        systemctl show "$service" \
-            -p LoadState \
-            --value \
-            2>/dev/null || true
-    )"
-
-    [[ "$load_state" == "loaded" ]] &&
-        [[ "$id" == "$service" ]] &&
-        [[ -n "$fragment" ]] &&
-        [[ "$fragment" != "/dev/null" ]]
-}
-
 detect_falco_service() {
     section "Detecting Falco service"
-
-    FALCO_SERVICE=""
 
     local candidates=(
         "falco-modern-bpf.service"
@@ -253,71 +211,136 @@ detect_falco_service() {
     )
 
     local service
-    local canonical
+    local unit_id
+    local fragment
+    local load_state
+    local unit_file_state
 
-    # Prefer known modern Falco units.
     for service in "${candidates[@]}"; do
-        if is_canonical_service "$service"; then
+
+        if ! systemctl cat "$service" >/dev/null 2>&1; then
+            continue
+        fi
+
+        unit_id="$(
+            systemctl show "$service" \
+                -p Id \
+                --value \
+                2>/dev/null || true
+        )"
+
+        fragment="$(
+            systemctl show "$service" \
+                -p FragmentPath \
+                --value \
+                2>/dev/null || true
+        )"
+
+        load_state="$(
+            systemctl show "$service" \
+                -p LoadState \
+                --value \
+                2>/dev/null || true
+        )"
+
+        unit_file_state="$(
+            systemctl show "$service" \
+                -p UnitFileState \
+                --value \
+                2>/dev/null || true
+        )"
+
+        if [[ "$load_state" == "loaded" &&
+              "$unit_id" == "$service" &&
+              -n "$fragment" &&
+              "$fragment" != "/dev/null" ]]; then
+
             FALCO_SERVICE="$service"
-            break
+
+            ok "Detected Falco service: $FALCO_SERVICE"
+
+            info "Unit ID: $unit_id"
+            info "Fragment: $fragment"
+            info "Unit file state: ${unit_file_state:-unknown}"
+
+            return 0
+        fi
+
+        if [[ "$service" == "falco.service" &&
+              "$load_state" == "loaded" &&
+              "$unit_id" != "$service" ]]; then
+
+            info "Ignoring Falco alias: $service"
+            info "Canonical unit is: ${unit_id:-unknown}"
         fi
     done
 
-    # Fall back to any canonical falco*.service.
-    if [[ -z "$FALCO_SERVICE" ]]; then
-        while IFS= read -r service; do
-            service="${service%% *}"
+    while IFS= read -r service; do
 
-            [[ "$service" == falco*.service ]] || continue
+        service="${service%% *}"
 
-            if is_canonical_service "$service"; then
-                FALCO_SERVICE="$service"
-                break
-            fi
-        done < <(
-            systemctl list-unit-files \
-                --type=service \
-                --no-legend \
+        [[ "$service" == falco*.service ]] || continue
+
+        unit_id="$(
+            systemctl show "$service" \
+                -p Id \
+                --value \
                 2>/dev/null || true
-        )
-    fi
+        )"
 
-    if [[ -z "$FALCO_SERVICE" ]]; then
-        error "Could not find a canonical Falco systemd service."
-        return 1
-    fi
+        fragment="$(
+            systemctl show "$service" \
+                -p FragmentPath \
+                --value \
+                2>/dev/null || true
+        )"
 
-    ok "Detected canonical Falco service: $FALCO_SERVICE"
+        load_state="$(
+            systemctl show "$service" \
+                -p LoadState \
+                --value \
+                2>/dev/null || true
+        )"
 
-    local fragment
-    local unit_file_state
+        if [[ "$load_state" == "loaded" &&
+              "$unit_id" == "$service" &&
+              -n "$fragment" &&
+              "$fragment" != "/dev/null" ]]; then
 
-    fragment="$(
-        systemctl show "$FALCO_SERVICE" \
-            -p FragmentPath \
-            --value \
+            FALCO_SERVICE="$service"
+
+            ok "Detected Falco service: $FALCO_SERVICE"
+
+            info "Unit ID: $unit_id"
+            info "Fragment: $fragment"
+
+            return 0
+        fi
+
+    done < <(
+        systemctl list-unit-files \
+            --type=service \
+            --no-legend \
             2>/dev/null || true
-    )"
+    )
 
-    unit_file_state="$(
-        systemctl show "$FALCO_SERVICE" \
-            -p UnitFileState \
-            --value \
-            2>/dev/null || true
-    )"
-
-    info "Fragment: ${fragment:-unknown}"
-    info "Unit file state: ${unit_file_state:-unknown}"
-
-    if [[ "$FALCO_SERVICE" != "falco.service" ]] &&
-       systemctl cat falco.service >/dev/null 2>&1; then
-        info "falco.service is treated as an alias/compatibility unit."
-    fi
+    error "Could not find a canonical Falco systemd service."
+    return 1
 }
 
 service_exists() {
     [[ -n "$FALCO_SERVICE" ]] || return 1
-    is_canonical_service "$FALCO_SERVICE"
+
+    local load_state
+
+    load_state="$(
+        systemctl show "$FALCO_SERVICE" \
+            -p LoadState \
+            --value \
+            2>/dev/null || true
+    )"
+
+    [[ "$load_state" == "loaded" ]]
 }
 
 falco_is_active() {
@@ -337,7 +360,7 @@ falco_is_enabled() {
 }
 
 # ---------------------------------------------------------------------------
-# Edera installation checks
+# Edera checks
 # ---------------------------------------------------------------------------
 
 check_edera_installation() {
@@ -359,17 +382,10 @@ check_edera_installation() {
         return 1
     fi
 
-    if [[ -r "$EDERA_PLUGIN" ]]; then
-        ok "Edera Falco plugin is readable"
-    else
-        error "Edera Falco plugin is not readable"
-        return 1
-    fi
-
     if [[ -x /usr/sbin/protect-daemon ]]; then
         ok "protect-daemon exists: /usr/sbin/protect-daemon"
     else
-        warn "protect-daemon was not found at /usr/sbin/protect-daemon"
+        warn "protect-daemon binary was not found at /usr/sbin/protect-daemon"
     fi
 }
 
@@ -416,58 +432,33 @@ check_edera_socket() {
     else
         warn "Socket exists but could not be confirmed in ss output"
     fi
-}
 
-# ---------------------------------------------------------------------------
-# Directory preparation
-# ---------------------------------------------------------------------------
+    if command -v lsof >/dev/null 2>&1; then
 
-prepare_falco_directories() {
-    section "Preparing Falco directories"
+        local owner
 
-    run install \
-        -d \
-        -m 0755 \
-        "$FALCO_CONFIG_DROPIN_DIR"
+        owner="$(
+            lsof -U 2>/dev/null |
+                grep -F "$EDERA_SOCKET" |
+                head -n 1 ||
+                true
+        )"
 
-    run install \
-        -d \
-        -m 0755 \
-        "$FALCO_RULES_DIR"
-
-    ok "Falco configuration directory:"
-    echo "    $FALCO_CONFIG_DROPIN_DIR"
-
-    ok "Falco rules directory:"
-    echo "    $FALCO_RULES_DIR"
-}
-
-# ---------------------------------------------------------------------------
-# Existing configuration backup
-# ---------------------------------------------------------------------------
-
-backup_existing_file() {
-    local file="$1"
-
-    if [[ ! -f "$file" ]]; then
-        return 0
+        if [[ -n "$owner" ]]; then
+            ok "Socket owner:"
+            echo "    $owner"
+        fi
     fi
-
-    local timestamped_backup
-
-    timestamped_backup="${file}.pre-edera.$(date '+%Y%m%d-%H%M%S').bak"
-
-    cp -a \
-        -- "$file" \
-        "$timestamped_backup"
-
-    ok "Backed up existing file:"
-    echo "    $file"
-    echo "    -> $timestamped_backup"
 }
+
+# ---------------------------------------------------------------------------
+# Stale configuration
+# ---------------------------------------------------------------------------
 
 find_stale_backups() {
-    [[ -d "$FALCO_CONFIG_DROPIN_DIR" ]] || return 0
+    if [[ ! -d "$FALCO_CONFIG_DROPIN_DIR" ]]; then
+        return 0
+    fi
 
     find "$FALCO_CONFIG_DROPIN_DIR" \
         -maxdepth 1 \
@@ -486,11 +477,13 @@ remove_stale_backups() {
     local file
 
     while IFS= read -r -d '' file; do
+
         info "Removing stale Edera backup: $file"
 
         rm -f -- "$file"
 
         removed=$((removed + 1))
+
     done < <(find_stale_backups)
 
     if [[ "$removed" -eq 0 ]]; then
@@ -507,10 +500,12 @@ check_stale_backups() {
     local file
 
     while IFS= read -r -d '' file; do
+
         warn "Stale Edera configuration found:"
         echo "    $file"
 
         found=1
+
     done < <(find_stale_backups)
 
     if [[ "$found" -eq 0 ]]; then
@@ -522,21 +517,19 @@ check_stale_backups() {
 }
 
 # ---------------------------------------------------------------------------
-# Edera plugin configuration
+# Falco plugin configuration
 # ---------------------------------------------------------------------------
 
 write_edera_config() {
     section "Writing Edera Falco plugin configuration"
 
-    backup_existing_file "$EDERA_CONFIG"
+    install -d -m 0755 "$FALCO_CONFIG_DROPIN_DIR"
+
+    rm -f -- "$EDERA_CONFIG_BACKUP"
+
+    remove_stale_backups
 
     cat > "$EDERA_CONFIG" <<EOF
-# ============================================================================
-# Edera Falco plugin configuration
-#
-# Managed by the Edera + Falco installer.
-# ============================================================================
-
 plugins:
   - name: edera
     library_path: ${EDERA_PLUGIN}
@@ -557,12 +550,27 @@ EOF
 
 # ---------------------------------------------------------------------------
 # Edera Falco rules
+#
+# IMPORTANT:
+# Keep output expressions deliberately conservative.
+#
+# The Edera plugin has already demonstrated support for:
+#   %edera.zone.id
+#   %proc.exe
+#   %proc.cmdline
+#   %fd.name
+#   %fd.rip
+#   %fd.rport
+#   %fd.l4proto
+#
+# Avoid additional output fields unless the plugin/Falco installation
+# explicitly exposes them.
 # ---------------------------------------------------------------------------
 
 write_edera_rules() {
     section "Writing Edera Falco rules"
 
-    backup_existing_file "$EDERA_RULES"
+    install -d -m 0755 "$FALCO_RULES_DIR"
 
     cat > "$EDERA_RULES" <<'EOF'
 # ============================================================================
@@ -572,7 +580,7 @@ write_edera_rules() {
 #
 #   edera_zone
 #
-# Managed by the Edera + Falco installer.
+# These rules are managed by the Edera + Falco installer.
 # ============================================================================
 
 - rule: Edera Proc Environ Read
@@ -660,8 +668,7 @@ write_edera_rules() {
   condition: >
     evt.pluginname == "edera" and
     evt.type in (execve, execveat) and
-    (proc.cmdline contains "curl" or
-     proc.cmdline contains "wget") and
+    (proc.cmdline contains "curl" or proc.cmdline contains "wget") and
     (proc.cmdline contains "| sh" or
      proc.cmdline contains "| bash" or
      proc.cmdline contains "| ash")
@@ -673,7 +680,7 @@ write_edera_rules() {
   source: edera_zone
   output: >
     Reconnaissance tool executed in zone
-    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline user=%user.name)
+    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
   priority: WARNING
   condition: >
     evt.pluginname == "edera" and
@@ -687,7 +694,7 @@ write_edera_rules() {
   source: edera_zone
   output: >
     Execution from ephemeral directory in zone
-    (zone_id=%edera.zone.id proc=%proc.exe path=%proc.exepath cmdline=%proc.cmdline)
+    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
   priority: WARNING
   condition: >
     evt.pluginname == "edera" and
@@ -703,7 +710,7 @@ write_edera_rules() {
   source: edera_zone
   output: >
     Unexpected shell child process in zone
-    (zone_id=%edera.zone.id shell=%proc.name parent=%proc.pname cmdline=%proc.cmdline)
+    (zone_id=%edera.zone.id proc=%proc.exe cmdline=%proc.cmdline)
   priority: CRITICAL
   condition: >
     evt.pluginname == "edera" and
@@ -718,7 +725,7 @@ write_edera_rules() {
   source: edera_zone
   output: >
     Shell history alteration or wipe detected in zone
-    (zone_id=%edera.zone.id proc=%proc.exe file=%fd.name cmdline=%proc.cmdline)
+    (zone_id=%edera.zone.id proc=%proc.exe file=%fd.name)
   priority: WARNING
   condition: >
     evt.pluginname == "edera" and
@@ -740,19 +747,25 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Rule inspection
+# Edera rules inspection
+#
+# This implementation intentionally avoids fragile arithmetic expressions.
 # ---------------------------------------------------------------------------
 
 get_edera_rule_count() {
-    if [[ ! -f "$EDERA_RULES" ]]; then
-        echo 0
-        return 0
+    local count
+
+    count="$(
+        grep -cE '^[[:space:]]*-[[:space:]]*rule:' "$EDERA_RULES" 2>/dev/null || true
+    )"
+
+    # grep can return an empty result in unusual cases.
+    # Always return a valid integer.
+    if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+        count=0
     fi
 
-    grep -cE \
-        '^[[:space:]]*-[[:space:]]rule:' \
-        "$EDERA_RULES" ||
-        true
+    printf '%s\n' "$count"
 }
 
 check_edera_rules_file() {
@@ -771,15 +784,29 @@ check_edera_rules_file() {
     fi
 
     local rule_count
+    local required_count
+    local custom_count
+    local rule
+    local missing=0
 
+    # IMPORTANT:
+    # Keep assignment and command substitution on a normal assignment line.
+    # Do not place the variable expansion on a separate line.
     rule_count="$(get_edera_rule_count)"
 
-    if [[ "$rule_count" -lt "${#REQUIRED_EDERA_RULES[@]}" ]]; then
-        error "Expected at least ${#REQUIRED_EDERA_RULES[@]} Edera rules."
-        error "Found: $rule_count"
+    required_count="${#REQUIRED_EDERA_RULES[@]}"
 
+    if [[ ! "$rule_count" =~ ^[0-9]+$ ]]; then
+        error "Could not determine Edera rule count"
+        return 1
+    fi
+
+    if (( rule_count < required_count )); then
+        error "Expected at least ${required_count} Edera rules, found ${rule_count}"
+
+        echo
         grep -nE \
-            '^[[:space:]]*-[[:space:]]rule:' \
+            '^[[:space:]]*-[[:space:]]*rule:' \
             "$EDERA_RULES" ||
             true
 
@@ -787,85 +814,39 @@ check_edera_rules_file() {
     fi
 
     ok "Edera rules file exists"
-    ok "Found $rule_count Edera rules"
+    ok "Found ${rule_count} Edera rules"
 
-    if [[ "$rule_count" -gt "${#REQUIRED_EDERA_RULES[@]}" ]]; then
-        local custom_count
+    if (( rule_count > required_count )); then
+        custom_count=$((rule_count - required_count))
 
-        custom_count=$(
-            (
-                rule_count -
-                ${#REQUIRED_EDERA_RULES[@]}
-            )
-        )
-
-        ok "Additional/custom rules detected: $custom_count"
+        ok "Additional/custom rules detected: ${custom_count}"
     fi
 
-    local rule
-
     for rule in "${REQUIRED_EDERA_RULES[@]}"; do
+
         if grep -Fq -- "- rule: $rule" "$EDERA_RULES"; then
             ok "Rule present: $rule"
         else
             error "Missing required Edera rule: $rule"
-            return 1
+            missing=$((missing + 1))
         fi
+
     done
+
+    if (( missing > 0 )); then
+        error "Missing ${missing} required Edera rule(s)"
+        return 1
+    fi
 
     echo
     echo "--- Installed Edera rule names ---"
 
     grep -nE \
-        '^[[:space:]]*-[[:space:]]rule:' \
+        '^[[:space:]]*-[[:space:]]*rule:' \
         "$EDERA_RULES" ||
         true
-}
 
-# ---------------------------------------------------------------------------
-# Falco plugin inspection
-# ---------------------------------------------------------------------------
-
-check_edera_plugin() {
-    section "Checking Edera plugin"
-
-    if ! command -v falco >/dev/null 2>&1; then
-        error "falco command not found"
-        return 1
-    fi
-
-    if [[ ! -f "$EDERA_PLUGIN" ]]; then
-        error "Plugin library does not exist:"
-        echo "    $EDERA_PLUGIN"
-        return 1
-    fi
-
-    local output
-
-    output="$(
-        falco --list-plugins 2>&1
-    )" || {
-        error "Falco --list-plugins failed"
-        printf '%s\n' "$output"
-        return 1
-    }
-
-    if printf '%s\n' "$output" |
-        grep -qiE '^Name:[[:space:]]*edera$'; then
-
-        ok "Edera plugin is available to Falco"
-
-        printf '%s\n' "$output" |
-            grep -i -A8 -B1 \
-                '^Name:[[:space:]]*edera$' ||
-            true
-
-    else
-        error "Falco did not report the Edera plugin"
-        printf '%s\n' "$output"
-
-        return 1
-    fi
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -918,54 +899,97 @@ validate_falco_configuration() {
     set -e
 
     printf '%s\n' "$output" |
-        sed -n '1,220p'
+        sed -n '1,240p'
 
+    # timeout itself returning 124 means Falco stayed alive for the
+    # validation period. That is expected.
     if [[ "$rc" -eq 124 ]]; then
+
         ok "Falco remained running during validation"
+
     elif [[ "$rc" -ne 0 ]]; then
+
+        error "Falco exited with code $rc during configuration validation"
+
         if printf '%s\n' "$output" |
             grep -qiE \
-                'error|fatal|failed|cannot load|could not load'; then
+                'error:|fatal|failed|invalid|cannot load|could not load|LOAD_ERR|compile error'; then
 
-            error "Falco reported an error during configuration validation"
+            error "Falco reported a configuration/plugin/rule error"
             return 1
         fi
 
-        warn "Falco returned exit code $rc during validation"
-    fi
+        warn "Falco returned exit code $rc without a recognised error string"
 
-    if printf '%s\n' "$output" |
-        grep -qiE 'error|fatal|cannot load|could not load'; then
-
-        error "Falco validation output contains an error"
         return 1
     fi
 
-    if printf '%s\n' "$output" |
-        grep -qiE 'Loaded plugin .*edera|plugin.*edera'; then
+    # -----------------------------------------------------------------------
+    # Plugin verification
+    # -----------------------------------------------------------------------
 
-        ok "Falco validation references the Edera plugin"
+    if printf '%s\n' "$output" |
+        grep -qiE \
+            "Loaded plugin 'edera@|Loaded plugin .*edera"; then
+
+        ok "Falco loaded the Edera plugin"
+
     else
-        warn "Falco validation output did not explicitly mention the Edera plugin"
+
+        error "Falco validation did not confirm the Edera plugin"
+
+        return 1
     fi
+
+    # -----------------------------------------------------------------------
+    # Edera source verification
+    # -----------------------------------------------------------------------
 
     if printf '%s\n' "$output" |
         grep -q 'edera_zone'; then
 
-        ok "Falco validation references edera_zone"
+        ok "Falco validation references Edera event source: edera_zone"
+
     else
+
         warn "Falco validation output did not explicitly mention edera_zone"
+        warn "The plugin itself was loaded successfully."
+    fi
+
+    # -----------------------------------------------------------------------
+    # Rule validation
+    #
+    # Do not require Falco's startup output to print every rule name.
+    # The actual authority here is Falco returning successfully after
+    # loading the rules file.
+    # -----------------------------------------------------------------------
+
+    if printf '%s\n' "$output" |
+        grep -q \
+            "$EDERA_RULES.*schema validation: ok"; then
+
+        ok "Edera rules file passed Falco schema validation"
+
+    elif printf '%s\n' "$output" |
+        grep -q \
+            "$EDERA_RULES"; then
+
+        ok "Falco loaded the Edera rules file"
+
+    else
+
+        warn "Could not find an explicit Edera rules-file message in Falco output"
     fi
 
     ok "Falco configuration validation completed"
 }
 
 # ---------------------------------------------------------------------------
-# Edera event-source validation
+# Plugin inspection
 # ---------------------------------------------------------------------------
 
-check_edera_source() {
-    section "Checking Edera event source"
+check_edera_plugin() {
+    section "Checking Edera plugin"
 
     if ! command -v falco >/dev/null 2>&1; then
         error "falco command not found"
@@ -975,20 +999,61 @@ check_edera_source() {
     local output
 
     output="$(
+        falco --list-plugins 2>&1 || true
+    )"
+
+    if printf '%s\n' "$output" |
+        grep -qiE '^Name:[[:space:]]*edera$'; then
+
+        ok "Edera plugin is available to Falco"
+
+        printf '%s\n' "$output" |
+            grep -i -A8 -B1 \
+                '^Name:[[:space:]]*edera$' ||
+            true
+
+    else
+
+        error "Falco did not report the Edera plugin"
+        printf '%s\n' "$output"
+
+        return 1
+    fi
+}
+
+check_edera_source() {
+    section "Checking Edera event source"
+
+    if ! command -v falco >/dev/null 2>&1; then
+        error "falco command not found"
+        return 1
+    fi
+
+    local output=""
+    local rc=0
+
+    set +e
+
+    output="$(
         timeout 15 \
             falco \
             -c "$FALCO_CONFIG" \
             -M 1 \
             -v \
-            2>&1 ||
-            true
+            2>&1
     )"
+
+    rc=$?
+
+    set -e
 
     if printf '%s\n' "$output" |
         grep -q 'edera_zone'; then
 
         ok "Edera event source edera_zone is available"
+
     else
+
         error "Edera event source edera_zone was not detected"
 
         printf '%s\n' "$output" |
@@ -1001,16 +1066,21 @@ check_edera_source() {
     fi
 
     if printf '%s\n' "$output" |
-        grep -qiE 'Loaded plugin .*edera@|Loaded plugin .*edera'; then
+        grep -qiE \
+            "Loaded plugin 'edera@|Loaded plugin .*edera"; then
 
         ok "Falco loaded the Edera plugin"
+
     else
-        warn "Could not explicitly confirm plugin loading from verbose output"
+
+        warn "Could not confirm plugin load from verbose output"
     fi
+
+    return 0
 }
 
 # ---------------------------------------------------------------------------
-# Falco operations
+# Falco service operations
 # ---------------------------------------------------------------------------
 
 restart_falco() {
@@ -1027,11 +1097,14 @@ restart_falco() {
     run systemctl daemon-reload
     run systemctl restart "$FALCO_SERVICE"
 
-    sleep 2
+    sleep 3
 
     if falco_is_active; then
+
         ok "Falco is active: $FALCO_SERVICE"
+
     else
+
         error "Falco failed to become active"
 
         systemctl status \
@@ -1044,7 +1117,7 @@ restart_falco() {
 
         journalctl \
             -u "$FALCO_SERVICE" \
-            -n 100 \
+            --since "2 minutes ago" \
             --no-pager ||
             true
 
@@ -1061,7 +1134,9 @@ enable_falco() {
     fi
 
     if falco_is_enabled; then
+
         ok "Falco is already enabled: $FALCO_SERVICE"
+
         return 0
     fi
 
@@ -1088,9 +1163,10 @@ show_status() {
 
     echo "Falco canonical service:"
     echo "  ${FALCO_SERVICE:-not detected}"
+    echo
 
     if [[ -n "$FALCO_SERVICE" ]]; then
-        echo
+
         echo "--- systemctl show ---"
 
         systemctl show \
@@ -1138,7 +1214,7 @@ show_status() {
         true
 
     echo
-    echo "Edera plugin configuration:"
+    echo "Edera configuration:"
 
     ls -l \
         "$EDERA_CONFIG" \
@@ -1157,12 +1233,16 @@ show_status() {
     echo "--- Edera rule names ---"
 
     if [[ -f "$EDERA_RULES" ]]; then
+
         grep -E \
-            '^[[:space:]]*-[[:space:]]rule:' \
+            '^[[:space:]]*-[[:space:]]*rule:' \
             "$EDERA_RULES" ||
             true
+
     else
+
         warn "Edera rules file does not exist"
+
     fi
 }
 
@@ -1185,12 +1265,15 @@ show_logs() {
     echo "--- Falco ---"
 
     if [[ -n "$FALCO_SERVICE" ]]; then
+
         journalctl \
             -u "$FALCO_SERVICE" \
             --since "30 minutes ago" \
             --no-pager ||
             true
+
     else
+
         warn "Falco service was not detected"
     fi
 }
@@ -1221,6 +1304,7 @@ health_check() {
     fi
 
     if [[ -n "$FALCO_SERVICE" ]]; then
+
         if falco_is_active; then
             ok "Falco service is active"
         else
@@ -1234,7 +1318,9 @@ health_check() {
             warn "Falco service is not enabled"
             failures=$((failures + 1))
         fi
+
     else
+
         error "No Falco service available"
         failures=$((failures + 1))
     fi
@@ -1271,11 +1357,15 @@ health_check() {
     echo
 
     if [[ "$failures" -eq 0 ]]; then
+
         ok "HEALTH CHECK PASSED"
+
         return 0
+
     fi
 
     error "HEALTH CHECK FAILED: $failures check(s)"
+
     return 1
 }
 
@@ -1287,7 +1377,7 @@ cleanup() {
     section "Removing Edera Falco configuration"
 
     if [[ -n "$FALCO_SERVICE" ]] &&
-       falco_is_active; then
+        falco_is_active; then
 
         info "Stopping $FALCO_SERVICE..."
 
@@ -1297,6 +1387,7 @@ cleanup() {
     fi
 
     rm -f -- "$EDERA_CONFIG"
+    rm -f -- "$EDERA_CONFIG_BACKUP"
     rm -f -- "$EDERA_RULES"
 
     find "$FALCO_CONFIG_DROPIN_DIR" \
@@ -1314,19 +1405,13 @@ cleanup() {
     ok "Removed Edera Falco configuration and rules"
 
     if [[ -n "$FALCO_SERVICE" ]] &&
-       service_exists; then
+        service_exists; then
 
         systemctl daemon-reload
 
         systemctl start \
             "$FALCO_SERVICE" ||
             true
-
-        if falco_is_active; then
-            ok "Falco restarted successfully after cleanup"
-        else
-            warn "Falco did not become active after cleanup"
-        fi
     fi
 
     ok "Cleanup complete"
@@ -1353,7 +1438,17 @@ install_integration() {
 
     section "Step 4: Prepare Falco directories"
 
-    prepare_falco_directories
+    run install \
+        -d \
+        -m 0755 \
+        "$FALCO_CONFIG_DROPIN_DIR"
+
+    run install \
+        -d \
+        -m 0755 \
+        "$FALCO_RULES_DIR"
+
+    ok "Falco configuration directories ready"
 
     section "Step 5: Remove stale Edera configuration backups"
 
@@ -1371,7 +1466,7 @@ install_integration() {
 
     check_edera_rules_file
 
-    section "Step 9: Validate Falco configuration before restart"
+    section "Step 9: Validate configuration before restart"
 
     validate_falco_configuration
 
@@ -1401,7 +1496,7 @@ install_integration() {
     echo "  $FALCO_SERVICE"
 
     echo
-    echo "Falco compatibility alias:"
+    echo "Falco alias:"
     echo "  falco.service"
 
     echo
@@ -1432,7 +1527,7 @@ install_integration() {
     echo "Edera rules installed:"
 
     grep -E \
-        '^[[:space:]]*-[[:space:]]rule:' \
+        '^[[:space:]]*-[[:space:]]*rule:' \
         "$EDERA_RULES" ||
         true
 }
@@ -1455,11 +1550,12 @@ This script configures the Edera Falco plugin already installed under:
 
   $EDERA_ROOT
 
-It does NOT install Edera.
+The script deliberately uses the canonical Falco systemd unit rather than
+the falco.service alias.
 
-Falco configuration:
+For a modern eBPF Falco installation this will normally be:
 
-  $FALCO_CONFIG
+  falco-modern-bpf.service
 
 Edera Falco plugin configuration:
 
@@ -1469,11 +1565,7 @@ Edera Falco detection rules:
 
   $EDERA_RULES
 
-Edera event source:
-
-  edera_zone
-
-The installer requires these managed Edera rules:
+The installer requires these built-in Edera rules:
 
   - Edera Proc Environ Read
   - Edera Reverse Shell Tool
@@ -1482,16 +1574,11 @@ The installer requires these managed Edera rules:
   - Edera Outbound Connection
   - Edera Shell Pipe Execution
 
-Additional/custom rules are allowed.
+Additional/custom rules are allowed and will not cause the rule-count
+validation to fail.
 
-The script prefers:
-
-  falco-modern-bpf.service
-
-and falls back to other canonical falco*.service units if necessary.
-
-The script deliberately avoids treating falco.service as the canonical
-unit when it is only an alias.
+The installer validates the complete Falco configuration before restarting
+the Falco service.
 EOF
 }
 
