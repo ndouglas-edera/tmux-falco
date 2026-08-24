@@ -165,7 +165,8 @@ sudo protect workload launch \
 ```
 
 **[Rule 5](https://docs.edera.dev/guides/observability/falco-integration/#detect-outbound-network-connections): Detect outbound network connections** <br/>
-Initiates an outbound network connection using ```nc``` to trigger the IPv4 socket connection detection.
+Initiates an outbound network connection using ```nc``` to trigger the IPv4 socket connection detection. <br/>
+**FUN FACT:** This command triggers both the ```reverse shell``` attempt AND an ```outbound connection``` rules.
 ```
 sudo protect workload launch \
   --zone test-zone \
@@ -173,3 +174,6 @@ sudo protect workload launch \
   -t -a \
   docker.io/library/alpine:latest sh -c "nc -z 1.1.1.1 80"
 ```
+
+<img width="1531" height="711" alt="Screenshot 2026-08-24 at 14 42 23" src="https://github.com/user-attachments/assets/83ab9a0c-c722-4717-beaf-6bd1383d151c" />
+
