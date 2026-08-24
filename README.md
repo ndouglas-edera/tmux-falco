@@ -26,6 +26,12 @@ You can leave the session at any time with the ```exit``` command.
 - Switch Window: ```Ctrl+a``` then ```1```, ```2```, etc.
 - Detach Session: ```Ctrl+a``` then ```d```
 
+Check and remove duplicate sessions:
+```
+tmux ls
+tmux kill-session -t edera
+```
+
 ## Configuring Falco
 I tried configuring Falco but it looks like it was not present in the Edera environment by default:
 ```
