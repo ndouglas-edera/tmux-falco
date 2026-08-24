@@ -42,6 +42,25 @@ readonly EDERA_RULES="${FALCO_RULES_DIR}/falco-edera-rules.yaml"
 readonly EDERA_SERVICE="protect-daemon.service"
 
 # ---------------------------------------------------------------------------
+# Expected / managed Edera rules
+#
+# These are the rules that this installer expects to exist.
+#
+# IMPORTANT:
+# Additional custom rules are allowed.
+# The script deliberately does NOT require an exact total rule count.
+# ---------------------------------------------------------------------------
+
+readonly REQUIRED_EDERA_RULES=(
+    "Edera Proc Environ Read"
+    "Edera Reverse Shell Tool"
+    "Edera Namespace Escape Attempt"
+    "Edera Sensitive File Read"
+    "Edera Outbound Connection"
+    "Edera Shell Pipe Execution"
+)
+
+# ---------------------------------------------------------------------------
 # Colours
 # ---------------------------------------------------------------------------
 
@@ -188,32 +207,6 @@ check_commands() {
 
 FALCO_SERVICE=""
 
-#
-# Resolve a systemd service to its canonical unit.
-#
-# This matters because Falco commonly installs:
-#
-#   falco-modern-bpf.service
-#
-# with:
-#
-#   Alias=falco.service
-#
-# Therefore:
-#
-#   systemctl cat falco.service
-#
-# may work, but:
-#
-#   systemctl enable falco.service
-#
-# fails with:
-#
-#   Refusing to operate on alias name or linked unit file
-#
-# We therefore deliberately prefer the real/canonical unit.
-#
-
 detect_falco_service() {
     section "Detecting Falco service"
 
@@ -263,17 +256,6 @@ detect_falco_service() {
                 2>/dev/null || true
         )"
 
-        #
-        # A canonical service should:
-        #
-        #   - be loaded
-        #   - have an Id matching the name we supplied
-        #   - have a real FragmentPath
-        #
-        # An alias such as falco.service will instead resolve to:
-        #
-        #   Id=falco-modern-bpf.service
-        #
         if [[ "$load_state" == "loaded" &&
               "$unit_id" == "$service" &&
               -n "$fragment" &&
@@ -298,12 +280,6 @@ detect_falco_service() {
             info "Canonical unit is: ${unit_id:-unknown}"
         fi
     done
-
-    #
-    # Generic fallback.
-    #
-    # Look for actual Falco service units rather than aliases.
-    #
 
     while IFS= read -r service; do
 
@@ -550,14 +526,8 @@ write_edera_config() {
 
     install -d -m 0755 "$FALCO_CONFIG_DROPIN_DIR"
 
-    #
-    # Remove our own previous backup first.
-    #
     rm -f -- "$EDERA_CONFIG_BACKUP"
 
-    #
-    # Remove any stale Edera backups.
-    #
     remove_stale_backups
 
     cat > "$EDERA_CONFIG" <<EOF
@@ -686,7 +656,9 @@ write_edera_rules() {
     evt.pluginname == "edera" and
     evt.type in (execve, execveat) and
     (proc.cmdline contains "curl" or proc.cmdline contains "wget") and
-    (proc.cmdline contains "| sh" or proc.cmdline contains "| bash" or proc.cmdline contains "| ash")
+    (proc.cmdline contains "| sh" or
+     proc.cmdline contains "| bash" or
+     proc.cmdline contains "| ash")
 EOF
 
     chmod 0644 "$EDERA_RULES"
@@ -702,6 +674,10 @@ EOF
 # ---------------------------------------------------------------------------
 # Edera rules inspection
 # ---------------------------------------------------------------------------
+
+get_edera_rule_count() {
+    grep -cE '^[[:space:]]*-[[:space:]]rule:' "$EDERA_RULES" || true
+}
 
 check_edera_rules_file() {
     section "Checking Edera rules file"
@@ -720,17 +696,14 @@ check_edera_rules_file() {
 
     local rule_count
 
-    rule_count="$(
-        grep -cE '^[[:space:]]*- rule:' "$EDERA_RULES" ||
-            true
-    )"
+    rule_count="$(get_edera_rule_count)"
 
-    if [[ "$rule_count" -ne 5 ]]; then
-        error "Expected 5 Edera rules, found $rule_count"
+    if [[ "$rule_count" -lt "${#REQUIRED_EDERA_RULES[@]}" ]]; then
+        error "Expected at least ${#REQUIRED_EDERA_RULES[@]} Edera rules, found $rule_count"
 
         echo
         grep -nE \
-            '^[[:space:]]*- rule:' \
+            '^[[:space:]]*-[[:space:]]rule:' \
             "$EDERA_RULES" ||
             true
 
@@ -740,26 +713,34 @@ check_edera_rules_file() {
     ok "Edera rules file exists"
     ok "Found $rule_count Edera rules"
 
-    local expected_rules=(
-        "Edera Proc Environ Read"
-        "Edera Reverse Shell Tool"
-        "Edera Namespace Escape Attempt"
-        "Edera Sensitive File Read"
-        "Edera Outbound Connection"
-    )
+    if [[ "$rule_count" -gt "${#REQUIRED_EDERA_RULES[@]}" ]]; then
+        local custom_count
+
+        custom_count=$((rule_count - ${#REQUIRED_EDERA_RULES[@]}))
+
+        ok "Additional/custom rules detected: $custom_count"
+    fi
 
     local rule
 
-    for rule in "${expected_rules[@]}"; do
+    for rule in "${REQUIRED_EDERA_RULES[@]}"; do
 
         if grep -Fq -- "- rule: $rule" "$EDERA_RULES"; then
             ok "Rule present: $rule"
         else
-            error "Missing Edera rule: $rule"
+            error "Missing required Edera rule: $rule"
             return 1
         fi
 
     done
+
+    echo
+    echo "--- Installed Edera rule names ---"
+
+    grep -nE \
+        '^[[:space:]]*-[[:space:]]rule:' \
+        "$EDERA_RULES" ||
+        true
 }
 
 # ---------------------------------------------------------------------------
@@ -808,11 +789,6 @@ validate_falco_configuration() {
     printf '%s\n' "$output" |
         sed -n '1,200p'
 
-    #
-    # A timeout is expected if Falco successfully starts and continues
-    # running until timeout terminates it.
-    #
-
     if [[ "$rc" -eq 124 ]]; then
 
         ok "Falco remained running during validation"
@@ -830,26 +806,10 @@ validate_falco_configuration() {
         warn "Falco returned exit code $rc during validation"
     fi
 
-    #
-    # Check specifically for our Edera rule names.
-    #
-    # Depending on the exact Falco build, rule-loading diagnostics can
-    # differ, so absence of these strings is a warning rather than an
-    # immediate failure.
-    #
-
-    local expected_rules=(
-        "Edera Proc Environ Read"
-        "Edera Reverse Shell Tool"
-        "Edera Namespace Escape Attempt"
-        "Edera Sensitive File Read"
-        "Edera Outbound Connection"
-    )
-
     local rule
     local missing_rules=0
 
-    for rule in "${expected_rules[@]}"; do
+    for rule in "${REQUIRED_EDERA_RULES[@]}"; do
 
         if printf '%s\n' "$output" |
             grep -Fq "$rule"; then
@@ -865,15 +825,11 @@ validate_falco_configuration() {
     done
 
     if [[ "$missing_rules" -gt 0 ]]; then
-        warn "Falco validation output did not explicitly list $missing_rules Edera rule(s)"
+        warn "Falco validation output did not explicitly list $missing_rules managed Edera rule(s)"
         warn "This does not necessarily mean the rules failed to load."
     else
-        ok "Falco validation output references all Edera rules"
+        ok "Falco validation output references all managed Edera rules"
     fi
-
-    #
-    # Explicitly check for the Edera plugin/event source when possible.
-    #
 
     if printf '%s\n' "$output" |
         grep -qiE \
@@ -956,10 +912,6 @@ check_edera_source() {
 
         error "Edera event source edera_zone was not detected"
 
-        #
-        # Show useful portions of output for troubleshooting.
-        #
-
         printf '%s\n' "$output" |
             grep -iE \
                 'plugin|source|edera|error|warn' |
@@ -1024,15 +976,6 @@ enable_falco() {
         error "Falco service is not available"
         return 1
     fi
-
-    #
-    # IMPORTANT:
-    #
-    # Never enable the falco.service alias.
-    # Enable the canonical service, e.g.:
-    #
-    #   falco-modern-bpf.service
-    #
 
     if falco_is_enabled; then
 
@@ -1136,7 +1079,7 @@ show_status() {
     if [[ -f "$EDERA_RULES" ]]; then
 
         grep -E \
-            '^[[:space:]]*- rule:' \
+            '^[[:space:]]*-[[:space:]]rule:' \
             "$EDERA_RULES" ||
             true
 
@@ -1188,41 +1131,21 @@ health_check() {
 
     section "Edera + Falco health check"
 
-    #
-    # Falco service
-    #
-
     if ! detect_falco_service; then
         failures=$((failures + 1))
     fi
-
-    #
-    # Edera installation
-    #
 
     if ! check_edera_installation; then
         failures=$((failures + 1))
     fi
 
-    #
-    # Edera daemon
-    #
-
     if ! check_edera_service; then
         failures=$((failures + 1))
     fi
 
-    #
-    # Edera socket
-    #
-
     if ! check_edera_socket; then
         failures=$((failures + 1))
     fi
-
-    #
-    # Falco service state
-    #
 
     if [[ -n "$FALCO_SERVICE" ]]; then
 
@@ -1246,10 +1169,6 @@ health_check() {
         failures=$((failures + 1))
     fi
 
-    #
-    # Edera configuration
-    #
-
     if [[ -f "$EDERA_CONFIG" ]]; then
         ok "Edera Falco configuration exists"
     else
@@ -1259,41 +1178,21 @@ health_check() {
         failures=$((failures + 1))
     fi
 
-    #
-    # Edera rules file
-    #
-
     if ! check_edera_rules_file; then
         failures=$((failures + 1))
     fi
-
-    #
-    # Stale backups
-    #
 
     if ! check_stale_backups; then
         failures=$((failures + 1))
     fi
 
-    #
-    # Edera plugin
-    #
-
     if ! check_edera_plugin; then
         failures=$((failures + 1))
     fi
 
-    #
-    # Edera event source
-    #
-
     if ! check_edera_source; then
         failures=$((failures + 1))
     fi
-
-    #
-    # Complete Falco configuration
-    #
 
     if ! validate_falco_configuration; then
         failures=$((failures + 1))
@@ -1334,10 +1233,6 @@ cleanup() {
     rm -f -- "$EDERA_CONFIG"
     rm -f -- "$EDERA_CONFIG_BACKUP"
     rm -f -- "$EDERA_RULES"
-
-    #
-    # Remove all stale Edera backups.
-    #
 
     find "$FALCO_CONFIG_DROPIN_DIR" \
         -maxdepth 1 \
@@ -1474,8 +1369,9 @@ install_integration() {
 
     echo
     echo "Edera rules installed:"
+
     grep -E \
-        '^[[:space:]]*- rule:' \
+        '^[[:space:]]*-[[:space:]]rule:' \
         "$EDERA_RULES" ||
         true
 }
@@ -1513,13 +1409,17 @@ Edera Falco detection rules:
 
   $EDERA_RULES
 
-The installed Edera rules are:
+The installer requires these built-in Edera rules:
 
   - Edera Proc Environ Read
   - Edera Reverse Shell Tool
   - Edera Namespace Escape Attempt
   - Edera Sensitive File Read
   - Edera Outbound Connection
+  - Edera Shell Pipe Execution
+
+Additional/custom rules are allowed and will not cause the rule-count
+validation to fail.
 EOF
 }
 
