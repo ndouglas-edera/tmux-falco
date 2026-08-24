@@ -181,3 +181,60 @@ Confirm the **5** custom Falco rules are present:
 ```
 grep '^- rule:' /etc/falco/rules.d/falco-edera-rules.yaml
 ```
+
+In **Tab B**:
+```
+sudo journalctl -u falco-modern-bpf.service -f -o cat | grep --line-buffered -E "Critical|Warning|Notice|Error"
+```
+
+In **Tab A**:
+
+**[Rule 1](https://docs.edera.dev/guides/observability/falco-integration/#detect-credential-harvesting-via-procfs): Detect credential harvesting via procfs** <br/>
+Reads ```/proc/1/environ``` to trigger the ```procfs``` credential harvesting detection.
+```
+sudo protect workload launch \
+  --zone test-zone \
+  --name alpine-shell \
+  -t -a \
+  docker.io/library/alpine:latest sh -c "cat /proc/1/environ"
+```
+
+**[Rule 2](https://docs.edera.dev/guides/observability/falco-integration/#detect-reverse-shells-and-suspicious-network-tools): Detect reverse shells and suspicious network tools** <br/>
+Executes ```nc``` (netcat) to trigger the reverse shell tool detection.
+```
+sudo protect workload launch \
+  --zone test-zone \
+  --name alpine-shell \
+  -t -a \
+  docker.io/library/alpine:latest sh -c "nc -h"
+```
+
+**[Rule 3](https://docs.edera.dev/guides/observability/falco-integration/#detect-namespace-escape-attempts): Detect namespace escape attempts** <br/>
+Attempts to run ```nsenter``` to trigger the namespace escape detection.
+```
+sudo protect workload launch \
+  --zone test-zone \
+  --name alpine-shell \
+  -t -a \
+  docker.io/library/alpine:latest sh -c "nc -h"
+```
+
+**[Rule 4](https://docs.edera.dev/guides/observability/falco-integration/#detect-sensitive-file-reads): Detect sensitive file reads** <br/>
+Attempts to read ```/etc/shadow``` to trigger the sensitive file access detection.
+```
+sudo protect workload launch \
+  --zone test-zone \
+  --name alpine-shell \
+  -t -a \
+  docker.io/library/alpine:latest sh -c "cat /etc/shadow"
+```
+
+**[Rule 5](https://docs.edera.dev/guides/observability/falco-integration/#detect-outbound-network-connections): Detect outbound network connections** <br/>
+Initiates an outbound network connection using ```nc``` to trigger the IPv4 socket connection detection.
+```
+sudo protect workload launch \
+  --zone test-zone \
+  --name alpine-shell \
+  -t -a \
+  docker.io/library/alpine:latest sh -c "nc -z 1.1.1.1 80"
+```
