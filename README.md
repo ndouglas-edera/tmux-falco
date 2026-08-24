@@ -216,7 +216,7 @@ sudo protect workload launch \
   --zone test-zone \
   --name alpine-shell \
   -t -a \
-  docker.io/library/alpine:latest sh -c "nc -h"
+  docker.io/library/alpine:latest sh -c "nsenter -h"
 ```
 
 **[Rule 4](https://docs.edera.dev/guides/observability/falco-integration/#detect-sensitive-file-reads): Detect sensitive file reads** <br/>
